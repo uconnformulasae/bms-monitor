@@ -1,0 +1,27 @@
+List of ADBMS6830 Command:
+Write and Read Configuration: 1 
+Read Configuration: 2 
+Start Cell Voltage Conversion: 3 
+Read Cell Voltages: 4 
+Start S-Voltage Conversion: 5 
+Read S-Voltages: 6 
+Start Avg Cell Voltage Conversion: 7 
+Read Avg Cell Voltages: 8 
+Start F-Cell Voltage Conversion: 9 
+Read F-Cell Voltages: 10 
+Start Aux Voltage Conversion: 11 
+Read Aux Voltages: 12 
+Start RAux Voltage Conversion: 13 
+Read RAux Voltages: 14 
+Read Status Registers: 15 
+Loop Measurements: 16 
+Clear Cell registers: 17 
+Clear Aux registers: 18 
+Clear Spin registers: 19 
+Clear Fcell registers: 20 
+Write Configuration: 21 
+
+Print '0' for menu
+Please enter command: 
+
+

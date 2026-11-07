@@ -1,0 +1,12 @@
+Enter cmd:3
+Cell conversion completed
+Enter cmd:5
+S-Voltage conversion completed
+Enter cmd:7
+Avg Cell voltage conversion completed
+Enter cmd:9
+F Cell voltage conversion completed
+Enter cmd:11
+Aux voltage conversion completed
+Enter cmd:13
+RAux voltage conversion completed

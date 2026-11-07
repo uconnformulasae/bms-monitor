@@ -1,0 +1,103 @@
+
+
+##### MENU (cmd 0 / boot) #####
+List of ADBMS6830 Command:
+Write and Read Configuration: 1 
+Read Configuration: 2 
+Start Cell Voltage Conversion: 3 
+Read Cell Voltages: 4 
+Start S-Voltage Conversion: 5 
+Read S-Voltages: 6 
+Start Avg Cell Voltage Conversion: 7 
+Read Avg Cell Voltages: 8 
+Start F-Cell Voltage Conversion: 9 
+Read F-Cell Voltages: 10 
+Start Aux Voltage Conversion: 11 
+Read Aux Voltages: 12 
+Start RAux Voltage Conversion: 13 
+Read RAux Voltages: 14 
+Read Status Registers: 15 
+Loop Measurements: 16 
+Clear Cell registers: 17 
+Clear Aux registers: 18 
+Clear Spin registers: 19 
+Clear Fcell registers: 20 
+Write Configuration: 21 
+
+Print '0' for menu
+Please enter command: 
+
+
+
+
+##### cmd 1: write+read config #####
+IC1:
+Write Config A:
+0x0, 0x0, 0x0, 0x0, 0x0, 0x0
+
+Write Config B:
+0x0, 0x0, 0x0, 0x0, 0x0, 0x0
+
+IC1:
+Read Config A:
+REFON:0x0, CTH:0x0
+FLAG_D[0]:0x0, FLAG_D[1]:0x0, FLAG_D[2]:0x0, FLAG_D[3]:0x0, FLAG_D[4]:0x0, FLAG_D[5]:0x0, FLAG_D[6]:0x0, FLAG_D[7]:0x0
+OWA[2:0]:0x0, OWRNG:0x0, SOAKON:0x0, GPO:0x0, FC:0x0, COMM_BK:0x0, MUTE_ST:0x0, SNAP:0x0
+
+Read Config B:
+VUV:0x0, VOV:0x0, DCTO:0x0, DTRNG:0x0, DTMEN:0x0, DCC:0x0
+
+CCount:0,PECError:1
+
+
+
+##### cmd 4: read cell voltages #####
+IC1:C1=1.500000V,C2=1.500000V,C3=1.500000V,C4=1.500000V,C5=1.500000V,C6=1.500000V,C7=1.500000V,C8=1.500000V,C9=1.500000V,C10=1.500000V,C11=1.500000V,C12=1.500000V,C13=1.500000V,C14=1.500000V,C15=1.500000V,C16=1.500000V,CCount:0,PECError:1
+
+
+
+##### cmd 8: read avg cell voltages #####
+IC1:AC1=1.500000V,AC2=1.500000V,AC3=1.500000V,AC4=1.500000V,AC5=1.500000V,AC6=1.500000V,AC7=1.500000V,AC8=1.500000V,AC9=1.500000V,AC10=1.500000V,AC11=1.500000V,AC12=1.500000V,AC13=1.500000V,AC14=1.500000V,AC15=1.500000V,AC16=1.500000V,CCount:0,PECError:1
+
+
+
+##### cmd 12: read aux voltages #####
+IC1:AUX1=1.500000V,AUX2=1.500000V,AUX3=1.500000V,AUX4=1.500000V,AUX5=1.500000V,AUX6=1.500000V,AUX7=1.500000V,AUX8=1.500000V,AUX9=1.500000V,AUX10=1.500000V,VMV:30.000000V,V+:30.000000V,CCount:0,PECError:1
+
+
+
+##### cmd 14: read raux voltages #####
+IC1:RAUX1=1.500000V,RAUX2=1.500000V,RAUX3=1.500000V,RAUX4=1.500000V,RAUX5=1.500000V,RAUX6=1.500000V,RAUX7=1.500000V,RAUX8=1.500000V,RAUX9=1.500000V,RAUX10=1.500000V,CCount:0,PECError:1
+
+
+
+##### cmd 15: read status registers #####
+Adc Conversion Time = 0.375000ms
+IC1:
+Status A:
+VREF2:1.500000V, VREF3:1.500000V, ITMP:-73.000000°C
+
+Status B:
+VA:1.500000V, VD:1.500000V, VR4K:1.500000V
+
+Status C:
+CSFLT:0x0, OTP2_MED:0x0, OTP2_ED:0x0, OTP1_MED:0x0, OTP1_ED:0x0, VD_UV:0x0, VD_OV:0x0, VA_UV:0x0, VA_OV:0x0
+OSCCHK:0x0, TMODCHK:0x0, THSD:0x0, SLEEP:0x0, SPIFLT:0x0, COMP:0x0, VDEL:0x0, VDE:0x0
+
+Status D:
+C1UV:0x0, C2UV:0x0, C3UV:0x0, C4UV:0x0, C5UV:0x0, C6UV:0x0, C7UV:0x0, C8UV:0x0, C9UV:0x0, C10UV:0x0, C11UV:0x0, C12UV:0x0, C13UV:0x0, C14UV:0x0, C15UV:0x0, C16UV:0x0
+C1OV:0x0, C2OV:0x0, C3OV:0x0, C4OV:0x0, C5OV:0x0, C6OV:0x0, C7OV:0x0, C8OV:0x0, C9OV:0x0, C10OV:0x0, C11OV:0x0, C12OV:0x0, C13OV:0x0, C14OV:0x0, C15OV:0x0, C16OV:0x0
+CTS:0x0, CT:0x0
+
+Status E:
+GPI:0x0, REV_ID:0x0
+
+CCount:0, PECError:1
+
+
+
+##### cmd 22: read device SID #####
+IC1:
+Read Device SID:
+0x0, 0x0, 0x0, 0x0, 0x0, 0x0, CCount:0,PECError:1
+

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bms-monitor"
+version = "1.0.0"
+description = "Read-only display for the UConn Formula SAE BMS"
+readme = "README.md"
+requires-python = ">=3.9"
+# No required dependencies: the web UI and the tests use only the standard
+# library. pyserial and python-can are only needed for real hardware.
+dependencies = []
+
+[project.optional-dependencies]
+hardware = ["pyserial>=3.5", "python-can>=4.0"]
+
+[project.scripts]
+bms-monitor = "bms_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bms_monitor*"]
+
+[tool.setuptools.package-data]
+bms_monitor = ["web/static/*"]

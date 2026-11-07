@@ -1,0 +1,8 @@
+# Only needed to talk to real hardware. The web UI and the tests run on the
+# Python standard library alone.
+#
+#   pyserial    --source serial (Nucleo bench board over USB), and the serial
+#               transport for python-can's slcan interface (Orion CANdapter)
+#   python-can  --source can (F105 controller over CAN)
+pyserial>=3.5
+python-can>=4.0

@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMS Monitor</title>
+<!-- Everything is served locally (no CDN, external fonts or analytics)
+     because there's usually no internet at the track. -->
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- The state pill shows the at-a-glance stuff: link state, how many ICs
+     are answering, and the update rate. Port, poll plan, uptime etc. are in
+     the popover, which keeps updating even while it's closed. -->
+<header class="statusbar">
+  <div class="brand">BMS Monitor</div>
+
+  <div class="pillwrap">
+    <button type="button" class="statepill" id="statePill"
+            aria-expanded="false" aria-controls="sourcePanel"
+            title="Connection detail">
+      <span class="dot" id="linkDot" aria-hidden="true"></span>
+      <span class="state" id="stateText">NO-DATA</span>
+      <span class="sep" aria-hidden="true">&middot;</span>
+      <span class="tnum" id="chainText">&mdash;</span><span class="unit">ICs</span>
+      <span class="sep" aria-hidden="true">&middot;</span>
+      <span class="tnum" id="rateText">0.0</span><span class="unit">Hz</span>
+      <span class="caret" aria-hidden="true">&#9662;</span>
+    </button>
+
+    <div class="sourcepanel" id="sourcePanel" hidden>
+      <dl class="kvlist">
+        <dt>source</dt><dd id="sourceText">&hellip;</dd>
+        <dt>link</dt><dd id="linkText">&mdash;</dd>
+        <dt>uptime</dt><dd class="tnum" id="uptimeText">0s</dd>
+        <dt>PEC errors</dt><dd class="tnum" id="pecText">0</dd>
+        <dt>CSV log</dt><dd id="csvText">off</dd>
+      </dl>
+      <p class="hint" id="linkError"></p>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <button id="btnPause" aria-pressed="false" title="Freeze the display. Data keeps arriving and keeps being logged.">Pause</button>
+  <button type="button" id="btnCsv" title="Download the recorded history as a CSV you can replay with --source replay">Export CSV</button>
+  <button id="btnSettings" aria-pressed="false" title="Display thresholds and thermistor curve">Settings</button>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="Views">
+  <button role="tab" data-tab="live" aria-selected="true">Live</button>
+  <button role="tab" data-tab="charge" aria-selected="false">Charge</button>
+  <button role="tab" data-tab="temps" aria-selected="false">Temperatures</button>
+  <button role="tab" data-tab="chain" aria-selected="false">Chain</button>
+  <button role="tab" data-tab="console" aria-selected="false">Raw console</button>
+</nav>
+
+<div class="replaybar" id="replayBar" hidden>
+  <button id="btnPlay" title="Play / pause the replay">&#9654; Play</button>
+  <label class="scrubwrap">
+    <span class="visually-hidden">Replay position</span>
+    <input type="range" id="scrub" min="0" max="1000" value="1000" step="1">
+  </label>
+  <span class="tnum" id="replayPos">0.0 / 0.0 s</span>
+  <label>speed
+    <select id="replaySpeed">
+      <option value="0.25">0.25x</option>
+      <option value="1" selected>1x</option>
+      <option value="4">4x</option>
+      <option value="16">16x</option>
+    </select>
+  </label>
+  <button id="btnLive" title="Jump to the end of the recording">End</button>
+  <span class="hint" id="replayFile"></span>
+</div>
+
+<main>
+  <div class="banner" id="banner" role="alert" aria-live="assertive">
+    <span class="icon" aria-hidden="true">&#9888;</span>
+    <div><b id="bannerTitle"></b><p id="bannerBody"></p></div>
+  </div>
+
+  <section class="panel settings" id="settingsPanel" hidden>
+    <header>
+      <h2>Display settings</h2>
+      <span class="hint">Display only. Nothing here is written to the BMS.</span>
+    </header>
+    <div class="settinggrid">
+      <label>Under-voltage (V)<input type="number" id="setUv" step="0.01"></label>
+      <label>Over-voltage (V)<input type="number" id="setOv" step="0.01"></label>
+      <label>Spread warning (mV)<input type="number" id="setWarn" step="1"></label>
+      <label>Spread critical (mV)<input type="number" id="setCrit" step="1"></label>
+      <label>NTC beta<input type="number" id="setBeta" step="1"></label>
+      <label>NTC R25 (&#8486;)<input type="number" id="setR25" step="100"></label>
+      <label>Divider series R (&#8486;)<input type="number" id="setSeries" step="100"></label>
+      <label>VREF2 (V)<input type="number" id="setVref" step="0.01"></label>
+    </div>
+    <div class="settingactions">
+      <button id="btnResetSettings">Reset to the values this run was started with</button>
+      <span class="hint">Saved in this browser only.</span>
+    </div>
+  </section>
+
+  <!-- ============================ LIVE ============================ -->
+  <div class="tabpanel" data-panel="live">
+    <section class="kpis" aria-label="Key figures">
+      <div class="kpi hero">
+        <div class="label">Pack voltage</div>
+        <div class="value" id="kpiPack">&mdash;</div>
+        <div class="sub" id="kpiPackSub">waiting for a valid frame</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Lowest cell</div>
+        <div class="value s1" id="kpiMin">&mdash;</div>
+        <div class="sub" id="kpiMinSub">&mdash;</div>
+        <canvas id="sparkMin" aria-hidden="true"></canvas>
+      </div>
+      <div class="kpi">
+        <div class="label">Highest cell</div>
+        <div class="value s2" id="kpiMax">&mdash;</div>
+        <div class="sub" id="kpiMaxSub">&mdash;</div>
+        <canvas id="sparkMax" aria-hidden="true"></canvas>
+      </div>
+      <div class="kpi">
+        <div class="label">Spread</div>
+        <div class="value" id="kpiSpread">&mdash;</div>
+        <div class="sub" id="kpiSpreadSub">max &minus; min</div>
+        <canvas id="sparkSpread" aria-hidden="true"></canvas>
+      </div>
+      <div class="kpi">
+        <div class="label">PEC errors</div>
+        <div class="value" id="kpiPec">&mdash;</div>
+        <div class="sub" id="kpiPecSub">in last 100 cycles</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Chain</div>
+        <div class="value" id="kpiChain">&mdash;</div>
+        <div class="sub" id="kpiChainSub">ICs answering</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Chain health</h2>
+        <span class="hint" id="chainHint">one indicator per ADBMS6830, in chain order</span>
+      </header>
+      <div class="icstrip" id="icStrip"></div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Cell view</h2>
+        <span class="hint" id="cellViewHint">Dot = cell voltage, bar = deviation from pack mean. Click a cell to pin it.</span>
+        <div class="filters" role="group" aria-label="Vertical scale">
+          <button data-cellscale="pack" aria-pressed="true" title="Zoom to the cells on screen. Thresholds are labelled at the edge when off scale.">Scale: auto</button>
+          <button data-cellscale="band" aria-pressed="false" title="Full under-voltage to over-voltage range, fixed.">Scale: UV&ndash;OV</button>
+        </div>
+      </header>
+      <!-- Segment board picker, filled in by app.js. Easier to hit than
+           clicking a panel in the canvas. -->
+      <nav class="drill" id="drillBar" aria-label="Cell view scope"></nav>
+      <div class="chartwrap">
+        <canvas id="cellCanvas" role="img" aria-label="Per-cell voltage dot plot"></canvas>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Time series</h2>
+        <div class="filters" role="group" aria-label="Time window">
+          <button data-window="30" aria-pressed="true">30 s</button>
+          <button data-window="120" aria-pressed="false">2 min</button>
+          <button data-window="600" aria-pressed="false">10 min</button>
+          <button data-series="context" aria-pressed="true" title="Draw every cell as grey context behind the emphasised ones">Context lines</button>
+          <button id="btnUnpin" title="Clear the pinned cell">Unpin</button>
+        </div>
+      </header>
+      <div class="legend">
+        <span><i class="l1"></i><span id="legendMin">min cell</span></span>
+        <span><i class="l2"></i><span id="legendMax">max cell</span></span>
+        <span><i class="lc"></i>other cells</span>
+        <span><i class="lp"></i>PEC-bad cycle (line breaks, never interpolated)</span>
+        <span><i class="lw"></i>partial chain</span>
+      </div>
+      <div class="chartwrap">
+        <canvas id="tsCanvas" role="img" aria-label="Cell voltage over time"></canvas>
+        <div class="tooltip" id="tsTooltip"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Cells</h2>
+        <div class="filters">
+          <button data-cellsview="grid" aria-pressed="true" title="Every cell at once, one row per IC">Grid</button>
+          <button data-cellsview="table" aria-pressed="false" title="Sortable detail, with UV/OV flags and rank">Table</button>
+          <span class="vsep" aria-hidden="true"></span>
+          <button data-cellunit="v" aria-pressed="true" title="Absolute cell voltage">Volts</button>
+          <button data-cellunit="mv" aria-pressed="false" title="Deviation from the pack mean">mV vs mean</button>
+          <button data-sort="chain" aria-pressed="true">Chain order</button>
+          <button data-sort="voltage" aria-pressed="false">Worst first</button>
+          <span class="hint" id="tableHint">&mdash;</span>
+        </div>
+      </header>
+
+      <!-- Every cell at once, no scrolling. One row per IC, so a silent IC
+           shows up as one blank row. -->
+      <div class="cellgrid" id="cellGrid"></div>
+      <p class="hint" id="cellGridLegend"></p>
+
+      <div class="tablewrap" id="cellTableWrap" hidden>
+        <table>
+          <thead>
+            <tr><th scope="col">Cell</th><th scope="col">Volts</th><th scope="col">mV vs mean</th><th scope="col">Rank</th><th scope="col">UV</th><th scope="col">OV</th></tr>
+          </thead>
+          <tbody id="cellTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Faults</h2>
+        <span class="hint" id="faultHint">status not polled</span>
+      </header>
+      <div class="faultgrid" id="faultGrid"></div>
+    </section>
+  </div>
+
+  <!-- ============================ CHARGE ============================ -->
+  <div class="tabpanel" data-panel="charge" hidden>
+    <section class="kpis" aria-label="Charge figures">
+      <div class="kpi hero">
+        <div class="label">Cell spread</div>
+        <div class="value" id="chgSpread">&mdash;</div>
+        <div class="sub" id="chgSpreadSub">max &minus; min</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Trend</div>
+        <div class="value" id="chgTrend">&mdash;</div>
+        <div class="sub" id="chgTrendSub">mV per minute</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Time to converge</div>
+        <div class="value" id="chgEta">&mdash;</div>
+        <div class="sub" id="chgEtaSub">extrapolation, not a measurement</div>
+      </div>
+      <div class="kpi na" id="kpiCurrent">
+        <div class="label">Pack current</div>
+        <div class="value na">n/a</div>
+        <div class="sub">the ADBMS6830 has no current input &mdash; needs an external shunt or hall sensor</div>
+      </div>
+      <div class="kpi na" id="kpiSoc">
+        <div class="label">State of charge</div>
+        <div class="value na">n/a</div>
+        <div class="sub" id="socSub">requires current integration on the controller</div>
+      </div>
+      <div class="kpi na" id="kpiBalancing">
+        <div class="label">Balancing</div>
+        <div class="value na">n/a</div>
+        <div class="sub" id="balSub">firmware DCC is not enabled &mdash; nothing balances yet</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Spread over time</h2>
+        <span class="hint">A charge or balance session is working when this trends down.</span>
+        <div class="filters">
+          <button data-chgwindow="120" aria-pressed="true">2 min</button>
+          <button data-chgwindow="600" aria-pressed="false">10 min</button>
+          <button data-chgwindow="3600" aria-pressed="false">1 h</button>
+        </div>
+      </header>
+      <div class="chartwrap"><canvas id="chgCanvas" role="img" aria-label="Cell spread over time"></canvas></div>
+    </section>
+
+    <section class="two">
+      <section class="panel">
+        <header>
+          <h2>Session</h2>
+          <span class="hint" id="sessionHint">not recording</span>
+        </header>
+        <div class="filters">
+          <button id="btnSession">Start session</button>
+          <button id="btnSessionExport" disabled>Export CSV</button>
+        </div>
+        <dl class="kvlist" id="sessionStats"></dl>
+      </section>
+
+      <section class="panel">
+        <header>
+          <h2>Cells, worst first</h2>
+          <span class="hint">stragglers first, not cell-number order</span>
+        </header>
+        <div class="rankwrap" id="rankList"></div>
+      </section>
+    </section>
+  </div>
+
+  <!-- ============================ TEMPS ============================ -->
+  <div class="tabpanel" data-panel="temps" hidden>
+    <section class="kpis" aria-label="Temperature figures">
+      <div class="kpi hero">
+        <div class="label">Hottest sensor</div>
+        <div class="value" id="tHot">&mdash;</div>
+        <div class="sub" id="tHotSub">&mdash;</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Coldest sensor</div>
+        <div class="value" id="tCold">&mdash;</div>
+        <div class="sub" id="tColdSub">&mdash;</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Mean</div>
+        <div class="value" id="tMean">&mdash;</div>
+        <div class="sub" id="tMeanSub">across all channels</div>
+      </div>
+      <div class="kpi">
+        <div class="label" id="tCountLabel">Channels</div>
+        <div class="value" id="tCount">&mdash;</div>
+        <div class="sub" id="tCountSub">AUX GPIO reporting a valid thermistor</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Temperature over time</h2>
+        <span class="hint" id="tempHint">&mdash;</span>
+      </header>
+      <div class="chartwrap"><canvas id="tempCanvas" role="img" aria-label="Temperature over time"></canvas></div>
+    </section>
+
+    <section class="panel">
+      <header>
+        <h2>Channels</h2>
+        <span class="hint" id="tempTableHint">NTC beta model &mdash; adjust the curve in Settings</span>
+      </header>
+      <div class="tablewrap">
+        <table>
+          <thead><tr id="tempTableHead" data-mode="aux"><th scope="col">Sensor</th><th scope="col">Volts</th><th scope="col">Resistance</th><th scope="col">&deg;C</th></tr></thead>
+          <tbody id="tempTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============================ CHAIN ============================ -->
+  <div class="tabpanel" data-panel="chain" hidden>
+    <section class="panel">
+      <header>
+        <h2>Daisy chain</h2>
+        <span class="hint">Per-IC state over the recent window. "Silent" means the poll cycle came back without that chip at all.</span>
+      </header>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th scope="col">IC</th><th scope="col">Segment</th><th scope="col">State</th><th scope="col">Seen</th><th scope="col">Good PEC</th><th scope="col">CCount</th><th scope="col">Jumps</th><th scope="col">Factory SID</th><th scope="col">Flags</th><th scope="col">Die &deg;C</th></tr></thead>
+          <tbody id="chainTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel">
+      <header><h2>Transport</h2><span class="hint">what this source is doing</span></header>
+      <dl class="kvlist" id="transportStats"></dl>
+    </section>
+  </div>
+
+  <!-- ============================ CONSOLE ============================ -->
+  <div class="tabpanel" data-panel="console" hidden>
+    <section class="panel">
+      <header>
+        <h2>Raw console</h2>
+        <span class="hint">Last 300 lines exactly as received, including lines the parser did not understand.</span>
+      </header>
+      <pre class="console" id="rawConsole" aria-live="off"></pre>
+    </section>
+  </div>
+</main>
+
+<footer>
+  Read-only monitor. It never writes configuration, never touches balancing and never clears registers.
+  State of charge and balancing come from the controller; this tool only displays them.
+</footer>
+
+<script src="/static/charts.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

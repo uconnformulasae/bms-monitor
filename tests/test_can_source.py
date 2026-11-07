@@ -5,8 +5,10 @@ faked, so bit timing, arbitration, error frames and adapter drivers aren't
 covered. Skipped when python-can isn't installed.
 """
 
+import sys
 import time
 import unittest
+from unittest import mock
 
 try:
     import can  # noqa: F401
@@ -81,17 +83,49 @@ class TestCanRobustness(unittest.TestCase):
         public = {n for n in dir(CanSource) if not n.startswith("_")}
         self.assertEqual(public, {"start", "stop", "subscribe", "status", "name"})
 
-    def test_can_source_module_never_sends(self):
-        """The CAN backend is read-only too: no .send( calls anywhere."""
+    def test_the_only_send_is_fed_by_the_gate(self):
+        """One .send( in the CAN backend, and its frames come from the
+        balance test control (which builds them in can_command_gate)."""
         import inspect
 
         from bms_monitor.sources import can_source
         src = inspect.getsource(can_source)
-        for line in src.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#") or stripped.startswith("*"):
-                continue
-            self.assertNotIn(".send(", line, line)
+        sends = [line.strip() for line in src.splitlines()
+                 if ".send(" in line and not line.strip().startswith("#")]
+        self.assertEqual(sends, ["bus.send(message, timeout=0.2)"])
+        self.assertIn("for can_id, data in self._tx.take():", src)
+        self.assertNotIn("can.Message(", src.replace("can_module.Message(", ""))
+
+
+class TestNormalizeSlcanChannel(unittest.TestCase):
+    def test_mac_path_becomes_com_on_windows(self):
+        from bms_monitor.sources import can_source
+
+        with mock.patch.object(can_source.sys, "platform", "win32"):
+            channel, note = can_source.normalize_slcan_channel(
+                "/dev/cu.usbserial-COM3")
+        self.assertEqual(channel, "COM3")
+        self.assertIn("COM3", note)
+
+    def test_com_unchanged_on_windows(self):
+        from bms_monitor.sources import can_source
+
+        with mock.patch.object(can_source.sys, "platform", "win32"):
+            channel, note = can_source.normalize_slcan_channel("COM3")
+        self.assertEqual(channel, "COM3")
+        self.assertIsNone(note)
+
+    def test_unix_path_unchanged(self):
+        from bms_monitor.sources import can_source
+
+        if sys.platform == "win32":
+            path = "/dev/cu.usbserial-ABC"
+        else:
+            path = "/dev/cu.usbserial-ABC"
+        with mock.patch.object(can_source.sys, "platform", "darwin"):
+            channel, note = can_source.normalize_slcan_channel(path)
+        self.assertEqual(channel, path)
+        self.assertIsNone(note)
 
 
 if __name__ == "__main__":

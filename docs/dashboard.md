@@ -23,6 +23,9 @@ PEC error totals and where the CSV log is going.
   `--warn-spread` and `--crit-spread`.
 - **Chain health**: one box per IC. `ok`, `PEC ERR` (its data failed the
   checksum), `flaky` (answering some cycles) or `SILENT` (not answering).
+  Over CAN the box also shows the chip's die temperature (`die ? °C` when
+  its status read failed), and `↯ C6` with an amber outline while one of
+  its cells is being discharged.
 - **Cell view**: one panel per segment board (`--ics-per-segment`, default
   2). Each dot is a cell and the bar shows how far it is from the pack
   average. Click a dot to follow that cell in the time series. Pick a board
@@ -35,9 +38,20 @@ PEC error totals and where the CSV log is going.
 - **Cells**: every cell at once, one row per chip, with a line between
   boards. The colour is how far the cell is from the pack average (blue low,
   orange high) and the number is always printed. A UV/OV flag adds a heavy
-  border and an arrow. A chip that didn't answer this cycle shows a blank
-  row, not its last reading. Click a tile to follow that cell. **Table**
-  switches to a sortable table.
+  border and an arrow. A cell being discharged gets an amber border and
+  `↯`, and the legend under the grid names it. A chip that didn't answer
+  this cycle shows a blank row, not its last reading. Click a tile to
+  follow that cell. **Table** switches to a sortable table, where a
+  discharging cell reads `↯ discharging`.
+
+Which cells are discharging comes from the controller's DCC bits in the
+per-IC frames. Those only arrive twice a second, so the marks can lag by up
+to half a second. While balancing (`--allow-tx`, see
+[can.md](can.md#balancing)) the groups in the current round are marked, and
+an IC box reads `↯ all` when every group on it is. When the controller
+reports a rest, balanced or a stop, the marks go at once rather than
+waiting for the next per-IC frame.
+Nothing is marked when the data isn't live or during replay.
 
 ## Charge tab
 
@@ -57,9 +71,10 @@ thermistor curve is in **Settings**. See [serial.md](serial.md).
 
 ## Chain tab
 
-Per-IC detail: how often each chip answered, its command counter, flags and
-die temperature over CAN, and its factory serial number over serial if you
-add `22` to `--poll`. The serial numbers confirm the chain is in the order
+Per-IC detail: how often each chip answered, its command counter, flags,
+die temperature and discharging channels (its DCC bits) over CAN, and its
+factory serial number over serial if you add `22` to `--poll`. A dash means
+not reported, which isn't the same as `none`. The serial numbers confirm the chain is in the order
 you expect and that nobody swapped a board.
 
 ## Raw console tab

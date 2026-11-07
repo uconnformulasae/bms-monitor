@@ -198,6 +198,20 @@ main { padding: var(--gap); display: grid; gap: var(--gap); max-width: 1500px; m
 }
 .panel .hint { font-size: 12px; color: var(--muted); }
 
+/* Balance test toggle (only with --allow-tx). */
+.balrow { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.balrow button { min-width: 72px; font-weight: 600; }
+.balrow button[aria-pressed="true"] {
+  background: rgba(250, 178, 25, 0.16);
+  border-color: rgba(250, 178, 25, 0.6);
+}
+.balrow button:disabled { opacity: 0.5; cursor: not-allowed; }
+.balstatus { font-size: 13.5px; color: var(--ink); }
+.balstatus.active { color: var(--warning); }
+.balstatus.bad { color: var(--critical); }
+.baldetail { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.baldetail:empty { display: none; }
+
 /* error banner */
 .banner {
   display: none;
@@ -390,6 +404,15 @@ td.flag-bad { color: var(--critical); font-weight: 600; }
 .cg-cell.cg-uv::after { content: " \25BC"; color: var(--critical); }
 .cg-cell.cg-ov::after { content: " \25B2"; color: var(--critical); }
 
+/* Being discharged (balance test or DCC bit). Border plus a glyph, so it
+   doesn't rely on colour. */
+.cg-cell.cg-bal {
+  border: 2px solid var(--warning);
+  color: var(--ink);
+  font-weight: 650;
+}
+.cg-cell.cg-bal::before { content: "\21AF "; color: var(--warning); }
+
 .cg-row.cg-silent .cg-rowlabel, .cg-row.cg-pec .cg-rowlabel {
   color: var(--critical);
   font-weight: 650;
@@ -556,6 +579,12 @@ footer code { color: var(--ink-2); }
 /* Controller-reported UV/OV/THSD flag. Also spelled out in the label. */
 .icbox.flagged { box-shadow: inset 0 0 0 2px var(--critical); }
 .icbox.unknown { border-left-color: var(--muted); opacity: 0.6; }
+.icbox small.icextra { display: block; color: var(--ink-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.icbox small.icextra:empty { display: none; }
+.icbox.balancing { box-shadow: inset 0 0 0 2px var(--warning); }
+.icbox.balancing.flagged { box-shadow: inset 0 0 0 2px var(--critical); }
+tbody tr.is-bal td:first-child { color: var(--warning); font-weight: 600; }
+td.flag-bal { color: var(--warning); font-weight: 600; }
 
 /* ------------------------------------------------ "not available" kpi */
 

@@ -15,6 +15,9 @@ failed. Without 0x6FF, a chip needs a fresh per-IC frame with no pec_fail.
 
 from __future__ import annotations
 
+import datetime
+import re
+import sys
 import threading
 import time
 from typing import Optional
@@ -38,13 +41,63 @@ BACKOFF_S = (0.5, 1.0, 2.0, 4.0, 5.0, 5.0)
 #: No frames at all for this long -> cycle the bus.
 STALL_TIMEOUT_S = 15.0
 
+#: With --allow-tx, a queued toggle goes out only once no frame has arrived
+#: for this long. The controller sends a burst every 100 ms, and the
+#: CANdapter corrupts the frame it is forwarding if our command reaches it at
+#: the same moment. Its USB chip holds partial data for up to 16 ms, so 25 ms
+#: of silence here means the burst is over on the adapter too.
+TX_GAP_S = 0.025
+
+#: On a bus that is never quiet that long, send anyway after this wait
+#: (inside can_command_gate.MAX_AGE_S, so the toggle is not dropped).
+TX_MAX_WAIT_S = 0.5
+
+#: Unparsed adapter lines and unknown frames logged per run, so a busy
+#: shared bus can't flood the raw console.
+ODD_LOG_LIMIT = 20
+
 DEFAULT_INTERFACE = "socketcan"
 DEFAULT_CHANNEL = "can0"
 DEFAULT_BITRATE = 250000
 
+_COM_PORT = re.compile(r"COM\d+", re.I)
+
+
+def normalize_slcan_channel(channel: str) -> tuple[str, Optional[str]]:
+    """Map macOS-style device paths to a Windows COM name when needed.
+
+    People often paste ``/dev/cu.usbserial-COM3`` from the docs; on Windows the
+    slcan backend needs ``COM3``.
+    """
+    if sys.platform != "win32":
+        return channel, None
+    match = _COM_PORT.search(channel)
+    if match:
+        fixed = match.group(0).upper()
+        if fixed == channel:
+            return channel, None
+        return fixed, "%s on Windows (not %r)" % (fixed, channel)
+    if channel.startswith("/dev/"):
+        try:
+            from serial.tools import list_ports
+            ports = [p.device for p in list_ports.comports()]
+        except Exception:
+            ports = []
+        if len(ports) == 1:
+            return ports[0], "only serial port found (%s); %r is invalid on Windows" % (
+                ports[0], channel)
+    return channel, None
+
+
+def _stamp() -> str:
+    """Wall-clock time to the millisecond, for raw-console lines."""
+    return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
 
 class CanSource(TelemetrySource):
-    """Read-only CAN receiver. Never transmits."""
+    """CAN receiver. Read-only unless given a ``tx_control``
+    (``--allow-tx``); then its reader thread also sends the frames that
+    control queues, and nothing else."""
 
     name = "can"
 
@@ -52,8 +105,9 @@ class CanSource(TelemetrySource):
                  interface: str = DEFAULT_INTERFACE,
                  bitrate: int = DEFAULT_BITRATE,
                  total_ic: int = 10, cells_per_ic: int = 9,
-                 warmup: int = 2):
+                 warmup: int = 2, tx_control=None):
         super().__init__()
+        self._tx = tx_control
         self.channel = channel
         self.interface = interface
         self.bitrate = int(bitrate)
@@ -83,6 +137,7 @@ class CanSource(TelemetrySource):
         self._chain_mode = False
         # The 0x6FF that opened the round currently being assembled.
         self._round_status: Optional[dict] = None
+        self._odd_logged = 0
         self._frames = {"cells": 0, "ic": 0, "temperatures": 0,
                         "summary": 0, "extremes": 0, "status": 0,
                         "unknown": 0, "bad": 0}
@@ -142,6 +197,7 @@ class CanSource(TelemetrySource):
             "oldest_frame_s": round(oldest, 2),
             "frames": frames,
             "reconnects": self._reconnects,
+            "tx": self._tx.status() if self._tx is not None else None,
             "poll_plan": [],
             "stuck_suspected": False,
             "lines": sum(frames.values()),
@@ -154,13 +210,19 @@ class CanSource(TelemetrySource):
 
     # -- bus ---------------------------------------------------------------
 
-    def _open_bus(self):
+    def _open_bus(self, **extra):
         import can
+        if self.interface == "slcan":
+            # The CANdapter's command ACK would otherwise eat a frame per send.
+            from .candapter import candapter_bus_class
+            bus = candapter_bus_class()(channel=self.channel, bitrate=self.bitrate, **extra)
+            bus.on_unparsed = self._note_unparsed
+            return bus
         kwargs = {"channel": self.channel, "interface": self.interface}
         # Some python-can versions reject a bitrate on the virtual bus.
         if self.interface not in ("virtual",):
             kwargs["bitrate"] = self.bitrate
-        return can.interface.Bus(**kwargs)
+        return can.interface.Bus(**kwargs, **extra)
 
     def _close_bus(self) -> None:
         bus, self._bus = self._bus, None
@@ -209,6 +271,8 @@ class CanSource(TelemetrySource):
             except Exception as exc:                 # pragma: no cover
                 self._set_link(LINK_RECONNECTING, error=repr(exc))
             finally:
+                if self._tx is not None:
+                    self._tx.discard()
                 self._close_bus()
 
             if self._stop_event.is_set():
@@ -218,11 +282,44 @@ class CanSource(TelemetrySource):
 
         self._set_link(LINK_DOWN)
 
+    def _send_queued(self, can_module, bus) -> bool:
+        """Send what the balance test control queued. False if the bus
+        failed and should be reopened."""
+        for can_id, data in self._tx.take():
+            message = can_module.Message(arbitration_id=can_id, data=data,
+                                         is_extended_id=False)
+            try:
+                bus.send(message, timeout=0.2)
+            except Exception as exc:
+                self._tx.note_error("send failed: %s" % exc)
+                self._emit("line", "can: TX 0x%03X %s failed: %s" % (can_id, data.hex(" "), exc))
+                return False
+            self._tx.note_sent()
+            self._emit("line", "can: %s TX 0x%03X %s" % (_stamp(), can_id, data.hex(" ")))
+        return True
+
+    def _tx_due(self) -> bool:
+        """A toggle is queued and the bus has been quiet for TX_GAP_S, or
+        it has waited TX_MAX_WAIT_S for a gap that never came."""
+        if self._tx is None:
+            return False
+        age = self._tx.oldest_age()
+        if age is None:
+            return False
+        quiet = (time.monotonic() - self._last_frame_t) >= TX_GAP_S
+        return quiet or age >= TX_MAX_WAIT_S
+
     def _session(self, can_module) -> None:
         bus = self._bus
+        # With transmit on, wake every TX_GAP_S so a toggle can go out in the
+        # first quiet gap between the controller's bursts.
+        recv_timeout = TX_GAP_S if self._tx is not None else 0.2
         while not self._stop_event.is_set():
+            if self._tx_due() and not self._send_queued(can_module, bus):
+                self._set_link(LINK_RECONNECTING, error="CAN send failed")
+                return
             try:
-                message = bus.recv(timeout=0.2)
+                message = bus.recv(timeout=recv_timeout)
             except Exception as exc:
                 self._set_link(LINK_RECONNECTING, error="CAN read failed: %s" % exc)
                 return
@@ -254,6 +351,11 @@ class CanSource(TelemetrySource):
             with self._lock:
                 key = "bad" if F.owns_id(message.arbitration_id) else "unknown"
                 self._frames[key] += 1
+                logged = self._odd_logged
+                self._odd_logged += 1
+            if logged < ODD_LOG_LIMIT:
+                self._emit("line", "can: %s %s frame 0x%03X %s" % (
+                    _stamp(), key, message.arbitration_id, bytes(message.data).hex(" ")))
             return
 
         kind = decoded["kind"]
@@ -268,6 +370,9 @@ class CanSource(TelemetrySource):
                 self._ics[decoded["ic_index"]] = (decoded, now)
         elif kind == "temperatures":
             self._handle_temps(decoded, now)
+        elif kind == "balance_cmd":
+            self._emit("line", "can: another node sent balance test %s on 0x%03X"
+                       % ("on" if decoded["enable"] else "off", decoded["id"]))
         elif kind in ("summary", "extremes", "status"):
             if decoded["id"] == F.ID_CHAIN_STATUS:
                 self._handle_chain_status(decoded)
@@ -388,6 +493,8 @@ class CanSource(TelemetrySource):
         readings = []
         for ic in range(1, self.total_ic + 1):
             if ic in not_responding:
+                if chain_mode:
+                    self._note_dropout(ic, "the controller flagged it invalid in 0x6FF")
                 continue
             diag = ic_state.get(ic - 1)
             volts = [flat.get((ic - 1) * self.cells_per_ic + cell)
@@ -403,7 +510,10 @@ class CanSource(TelemetrySource):
                                                   diag, pec_ok=False, now=now))
                     continue
             if any(v is None for v in volts):
-                continue                # no data (0xFFFF) or frame missing
+                # No data (0xFFFF) or frame missing.
+                if chain_mode:
+                    self._note_dropout(ic, self._dropout_reason(ic, cells))
+                continue
             readings.append(self._reading(ic, volts, diag, pec_ok=True, now=now))
 
         if not readings:
@@ -419,12 +529,36 @@ class CanSource(TelemetrySource):
         self._seq += 1
         self._emit("sample", pack)
 
+    def _note_unparsed(self, line: str) -> None:
+        """An adapter line python-can couldn't parse: usually a lost frame."""
+        with self._lock:
+            logged = self._odd_logged
+            self._odd_logged += 1
+        if logged < ODD_LOG_LIMIT:
+            self._emit("line", "can: %s adapter line not parsed: %r" % (_stamp(), line))
+
+    def _dropout_reason(self, ic: int, cells: dict) -> str:
+        """Why IC ``ic`` (1-based) has no complete reading this round."""
+        first = (ic - 1) * self.cells_per_ic
+        frames = sorted({(first + c) // F.CELLS_PER_FRAME for c in range(self.cells_per_ic)})
+        missing = [n for n in frames if n not in cells]
+        if missing:
+            return "cell frame(s) %s never arrived" % ", ".join(
+                "0x%03X" % (F.ID_CELLS_BASE + n) for n in missing)
+        return "the controller sent no data (0xFFFF) for some of its cells"
+
+    def _note_dropout(self, ic: int, reason: str) -> None:
+        """Raw-console line for an IC left out of a round, with the time, so
+        dropouts can be lined up against anything else on the bus."""
+        self._emit("line", "can: %s IC%d left out of this cycle: %s" % (_stamp(), ic, reason))
+
     def _reading(self, ic, volts, diag, pec_ok, now):
         padded = tuple(volts) + (0.0,) * (CELL_COUNT - len(volts))
         status_ok = None if diag is None else not diag.get("pec_fail")
-        flags = die_temp = ccount = None
+        flags = die_temp = ccount = balance_mask = None
         if status_ok:
             flags = tuple(f for f in diag.get("flags", ()) if f != "pec_fail")
+            balance_mask = diag.get("balancing_bitmap")
             die_temp = diag.get("die_temp_c")
             if die_temp is not None:
                 die_temp = round(die_temp, 1)   # the wire carries 0.1 degC
@@ -437,4 +571,5 @@ class CanSource(TelemetrySource):
             flags=flags, die_temp_c=die_temp,
             invalid_run=diag.get("consecutive_pec") if diag else None,
             status_ok=status_ok,
+            balance_mask=balance_mask,
         )

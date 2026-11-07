@@ -177,6 +177,10 @@ class Sample:
     #: the flags and die temperature) failed PEC, even though the cells were
     #: good. ``flags`` and ``die_temp_c`` are then unknown.
     status_ok: Optional[bool] = None
+    #: DCC (discharge) bits the controller reports for this chip, bit 0 =
+    #: physical channel C1. ``None`` = not reported, ``0`` = nothing
+    #: discharging.
+    balance_mask: Optional[int] = None
 
     # -- derived -----------------------------------------------------------
     @property
@@ -227,6 +231,7 @@ class Sample:
             "die_temp_c": self.die_temp_c,
             "invalid_run": self.invalid_run,
             "status_ok": self.status_ok,
+            "balance_mask": self.balance_mask,
         }
 
 
@@ -372,6 +377,7 @@ class PackSample:
                     "flags": list(r.flags) if r.flags is not None else None,
                     "die_temp_c": r.die_temp_c,
                     "status_ok": r.status_ok,
+                    "balance_mask": r.balance_mask,
                 }
                 for r in self.readings
             ],

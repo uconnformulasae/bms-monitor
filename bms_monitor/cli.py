@@ -83,6 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="python-can channel (default: can0)")
     grp.add_argument("--can-bitrate", type=int, default=250000,
                      help="bus bitrate (default: 250000, the F105 controller's CAN2)")
+    grp.add_argument("--allow-tx", action="store_true",
+                     help="allow transmitting the balance test toggle (0x740) from "
+                          "the dashboard; without it the tool never transmits")
 
     grp = parser.add_argument_group("acquisition")
     grp.add_argument("--poll", default="4",
@@ -171,7 +174,7 @@ def _print_commands() -> None:
     print("and can erase the fault you are diagnosing.")
 
 
-def _build_source(args, poll_plan):
+def _build_source(args, poll_plan, tx_control=None):
     if _dev and args.source in _dev.SOURCES:
         return _dev.build_source(args, poll_plan)
     if args.source == "serial":
@@ -191,7 +194,8 @@ def _build_source(args, poll_plan):
         from .sources.can_source import CanSource
         return CanSource(channel=args.can_channel, interface=args.can_interface,
                          bitrate=args.can_bitrate, total_ic=args.ics,
-                         cells_per_ic=args.cells_per_ic, warmup=args.warmup)
+                         cells_per_ic=args.cells_per_ic, warmup=args.warmup,
+                         tx_control=tx_control)
     raise SystemExit("unknown source %r" % args.source)
 
 
@@ -277,11 +281,27 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
+    if args.allow_tx and args.source != "can":
+        print("error: --allow-tx only works with --source can", file=sys.stderr)
+        if csv_logger:
+            csv_logger.close()
+        return 2
+    tx_control = None
+    if args.allow_tx:
+        from .sources.can_command_gate import BalanceTestControl
+        tx_control = BalanceTestControl()
+
+    can_channel_note = None
+    if args.source == "can" and args.can_interface == "slcan":
+        from .sources.can_source import normalize_slcan_channel
+        fixed, can_channel_note = normalize_slcan_channel(args.can_channel)
+        args.can_channel = fixed
+
     hub = Hub(history=max(100, args.history), csv_logger=csv_logger,
               ui_config=_ui_config(args, poll_plan), temp_csv_logger=temp_csv_logger)
 
     try:
-        source = _build_source(args, poll_plan)
+        source = _build_source(args, poll_plan, tx_control)
     except Exception as exc:
         print("error: %s" % exc, file=sys.stderr)
         if csv_logger:
@@ -291,7 +311,8 @@ def main(argv=None) -> int:
     hub.attach(source)
 
     try:
-        server = MonitorServer(hub, host="127.0.0.1", port=args.http_port)
+        server = MonitorServer(hub, host="127.0.0.1", port=args.http_port,
+                               tx_control=tx_control)
     except OSError as exc:
         print("error: cannot bind 127.0.0.1:%d (%s)" % (args.http_port, exc), file=sys.stderr)
         print("       another copy may already be running; try --http-port 8766",
@@ -339,8 +360,12 @@ def main(argv=None) -> int:
     elif args.source == "can":
         print("  bus        : %s:%s @ %d" % (args.can_interface, args.can_channel,
                                              args.can_bitrate))
+        if can_channel_note:
+            print("  note       : %s" % can_channel_note)
         print("  chain      : %d IC(s) x %d populated cells = %d cells"
               % (args.ics, args.cells_per_ic, args.ics * args.cells_per_ic))
+        print("  transmit   : %s" % ("balance test toggle (0x740), from the dashboard"
+                                     if tx_control else "off (read-only)"))
     else:
         print("  chain      : %d IC(s) x %d populated cells = %d cells"
               % (args.ics, args.cells_per_ic, args.ics * args.cells_per_ic))

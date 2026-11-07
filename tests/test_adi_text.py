@@ -322,7 +322,7 @@ class TestFixtures(unittest.TestCase):
             self.assertIn(key, merged)
 
     def test_aux_fixture(self):
-        records = parse_all(load("aux.txt"))
+        records = parse_all(load("aux_voltages.txt"))
         kinds = [r.kind for r in records if isinstance(r, CellRecord)]
         self.assertIn("aux", kinds)
         self.assertIn("raux", kinds)

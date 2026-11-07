@@ -299,6 +299,30 @@ ID_CHAIN_STATUS = 0x6FF
 CHAIN_STATE_INIT = 0
 CHAIN_STATE_RUNNING = 1
 
+#: Balancing state, byte 4 of 0x6FF (CAN_FRAMES_BAL_* in the firmware).
+#: Firmware without balancing sends 0 there, which reads as "off".
+BALANCE_STATES = {
+    0: "off",
+    1: "pending",
+    2: "discharging",
+    3: "balanced",
+    4: "refused",
+    5: "aborted",
+    6: "too_hot",
+    7: "cell_low",
+    8: "resting",
+}
+
+#: States in which bytes 5-6 are the lowest group and byte 7 the margin.
+BALANCE_ROUND_STATES = ("discharging", "resting", "balanced")
+BALANCE_NO_CELL = 0xFF
+
+#: Balance test command, the only frame the monitor transmits
+#: (``BMS_CAN_BALANCE_CMD_ID``). Byte 0: 1 = on, 0 = off. Byte 1: key.
+#: While it's on, the controller balances the pack in rounds.
+ID_BALANCE_CMD = 0x740
+BALANCE_CMD_KEY = 0xA5
+
 #: First cell-voltage frame.  ``0x700`` = cells 1-4, ``0x701`` = 5-8, ...
 ID_CELLS_BASE = 0x700
 #: Cells per frame: 8 bytes / 2 bytes per cell.
@@ -474,13 +498,21 @@ def from_cell_index(index: int, cells_per_ic: int) -> Tuple[int, int]:
     return index // cells_per_ic + 1, index % cells_per_ic + 1
 
 
-def encode_chain_status(chain_state: int, cycle: int, invalid_ics: int
-                        ) -> Tuple[int, bytes]:
-    """``0x6FF``: STATE | CYCLE | INVALID_ICS(u16 LE) | four reserved bytes."""
+def encode_chain_status(chain_state: int, cycle: int, invalid_ics: int,
+                        balance_state: int = 0, balance_ic: int = 0,
+                        balance_cell: int = 0,
+                        balance_margin_0p1mv: int = 0) -> Tuple[int, bytes]:
+    """``0x6FF``: STATE | CYCLE | INVALID_ICS(u16 LE) | BAL_STATE | BAL_IC |
+    BAL_CELL | BAL_MARGIN. The balance IC and cell are 0-based, 0xFF = none;
+    the margin is in 0.1 mV."""
     data = bytearray(8)
     data[0] = int(chain_state) & 0xFF
     data[1] = int(cycle) & 0xFF
     struct.pack_into("<H", data, 2, int(invalid_ics) & 0xFFFF)
+    data[4] = int(balance_state) & 0xFF
+    data[5] = int(balance_ic) & 0xFF
+    data[6] = int(balance_cell) & 0xFF
+    data[7] = int(balance_margin_0p1mv) & 0xFF
     return ID_CHAIN_STATUS, bytes(data)
 
 
@@ -490,14 +522,40 @@ def decode_chain_status(data: bytes) -> dict:
     ``invalid_ics`` is a bitmap with bit 0 = first chip. ``not_responding_ics``
     is 1-based to match the UI (the firmware's SWO report calls that chip IC0).
     """
-    state, cycle, invalid = struct.unpack("<BBH", _check(data, "0x6FF")[:4])
+    data = _check(data, "0x6FF")
+    state, cycle, invalid = struct.unpack("<BBH", data[:4])
+    bal_state, bal_ic, bal_cell = data[4], data[5], data[6]
+    name = BALANCE_STATES.get(bal_state, "unknown")
+    # Only these states name an IC or cell, and 0xFF means none. During a
+    # round it's the lowest group; "too_hot" names just the IC.
+    named = name in BALANCE_ROUND_STATES + ("aborted", "too_hot", "cell_low")
+    has_ic = named and bal_ic != BALANCE_NO_CELL
+    has_cell = has_ic and bal_cell != BALANCE_NO_CELL
     return {
         "chain_state": "RUNNING" if state == CHAIN_STATE_RUNNING else "INIT",
         "chain_running": state == CHAIN_STATE_RUNNING,
         "cycle": cycle,
         "invalid_ics_bitmap": invalid,
         "not_responding_ics": [i + 1 for i in range(16) if (invalid >> i) & 1],
+        "balance_state": name,
+        "balance_ic": bal_ic + 1 if has_ic else None,
+        "balance_cell": bal_cell + 1 if has_cell else None,
+        "balance_margin_mv": (data[7] / 10.0
+                              if name in BALANCE_ROUND_STATES and data[7] else None),
     }
+
+
+def encode_balance_cmd(enable: bool) -> Tuple[int, bytes]:
+    """``0x740``: balance test on (1) or off (0), then the key byte."""
+    if not isinstance(enable, bool):
+        raise ValueError("enable must be a bool, not %r" % (enable,))
+    return ID_BALANCE_CMD, bytes((1 if enable else 0, BALANCE_CMD_KEY))
+
+
+def decode_balance_cmd(data: bytes) -> dict:
+    if len(data) != 2 or data[1] != BALANCE_CMD_KEY or data[0] > 1:
+        raise ValueError("not a balance test command: %s" % data.hex())
+    return {"enable": data[0] == 1}
 
 
 def decode(can_id: int, data: bytes) -> Optional[dict]:
@@ -520,6 +578,9 @@ def decode(can_id: int, data: bytes) -> Optional[dict]:
             out = decode_ic_status(can_id, data); out["kind"] = "ic"
         elif ID_TEMPS_BASE <= can_id <= ID_TEMPS_LAST:
             out = decode_temps(can_id, data); out["kind"] = "temperatures"
+        elif can_id == ID_BALANCE_CMD:
+            # Another node (or a second monitor) sending the command.
+            out = decode_balance_cmd(data); out["kind"] = "balance_cmd"
         else:
             return None
     except (ValueError, struct.error):
@@ -536,4 +597,5 @@ def owns_id(can_id: int) -> bool:
             or can_id == ID_CHAIN_STATUS
             or ID_CELLS_BASE <= can_id <= ID_CELLS_LAST
             or ID_IC_BASE <= can_id <= ID_IC_LAST
-            or ID_TEMPS_BASE <= can_id <= ID_TEMPS_LAST)
+            or ID_TEMPS_BASE <= can_id <= ID_TEMPS_LAST
+            or can_id == ID_BALANCE_CMD)

@@ -164,24 +164,35 @@ class TestSourceInterfaceHasNoTransmitPath(unittest.TestCase):
 
 class TestHttpSurfaceIsReadOnly(unittest.TestCase):
     def test_handler_rejects_all_mutating_methods(self):
+        """PUT, DELETE and PATCH always 405. POST only reaches the balance
+        test, and only with a tx control (test_web checks the behaviour)."""
         src = read(os.path.join(PKG, "web", "server.py"))
-        self.assertIn("do_POST = do_PUT = do_DELETE = do_PATCH = _reject", src)
+        self.assertIn("do_PUT = do_DELETE = do_PATCH = _reject", src)
+        self.assertIn("if control is None or path != BALANCE_TEST_PATH:\n"
+                      "            return self._reject()", src)
 
     def test_no_endpoint_mentions_a_command_parameter(self):
+        """No path from the web layer to the serial command gate. The only
+        gate it may reach is the CAN balance test one."""
         src = read(os.path.join(PKG, "web", "server.py"))
-        for banned in ("encode_command", "command_gate", "poll_plan ="):
-            self.assertNotIn(banned, src,
-                             "the web layer must have no path to the command gate")
+        for banned in (r"\bencode_command\b", r"\bcommand_gate\b", r"poll_plan ="):
+            self.assertIsNone(re.search(banned, src),
+                              "the web layer must have no path to the command gate")
+        self.assertEqual(re.findall(r"control\.request\(", src), ["control.request("])
 
-    def test_frontend_never_posts(self):
+    def test_frontend_posts_only_the_balance_test(self):
         static = os.path.join(PKG, "web", "static")
+        posts = []
         for name in os.listdir(static):
             if not name.endswith(".js"):
                 continue
             src = read(os.path.join(static, name))
-            self.assertNotIn("method: 'POST'", src)
-            self.assertNotIn('method: "POST"', src)
             self.assertNotIn("XMLHttpRequest", src)
+            self.assertNotIn('method: "POST"', src)
+            posts += [name] * src.count("method: 'POST'")
+        self.assertEqual(posts, ["app.js"])
+        app = read(os.path.join(static, "app.js"))
+        self.assertIn("fetch(state.tx.path, {", app)
 
 
 class TestFrontendSafety(unittest.TestCase):
@@ -235,10 +246,10 @@ class TestNoExternalResources(unittest.TestCase):
         """Everything except pyserial and python-can is standard library."""
         import ast
         allowed_top_level = {
-            "abc", "argparse", "collections", "csv", "dataclasses", "enum",
-            "http", "io", "json", "math", "mimetypes", "os", "posixpath",
+            "abc", "argparse", "collections", "csv", "dataclasses", "datetime", "enum",
+            "hmac", "http", "io", "json", "math", "mimetypes", "os", "posixpath",
             "importlib", "queue", "random", "re", "select", "signal", "socket",
-            "socketserver", "struct", "sys", "tempfile", "threading", "time",
+            "secrets", "socketserver", "struct", "sys", "tempfile", "threading", "time",
             "typing", "unittest", "urllib", "webbrowser", "__future__",
         }
         lazy_ok = {"serial", "can"}

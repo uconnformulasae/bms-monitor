@@ -140,6 +140,20 @@
       </div>
     </section>
 
+    <section class="panel balance" id="balancePanel" hidden>
+      <header>
+        <h2>Balancing</h2>
+        <span class="hint">While this is on, the controller discharges every group above the lowest until it is within the margin, in rounds of 30 s discharging and 3 s resting so the readings it decides on aren't sagged. It stops by itself if a die is 80 &deg;C or more for over 5 s, or a cell reaches the undervoltage threshold.</span>
+      </header>
+      <div class="balrow">
+        <button type="button" id="balToggle" aria-pressed="false" aria-describedby="balStatus">Off</button>
+        <div>
+          <div class="balstatus" id="balStatus">&mdash;</div>
+          <div class="baldetail" id="balDetail"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel">
       <header>
         <h2>Chain health</h2>
@@ -355,7 +369,7 @@
       </header>
       <div class="tablewrap">
         <table>
-          <thead><tr><th scope="col">IC</th><th scope="col">Segment</th><th scope="col">State</th><th scope="col">Seen</th><th scope="col">Good PEC</th><th scope="col">CCount</th><th scope="col">Jumps</th><th scope="col">Factory SID</th><th scope="col">Flags</th><th scope="col">Die &deg;C</th></tr></thead>
+          <thead><tr><th scope="col">IC</th><th scope="col">Segment</th><th scope="col">State</th><th scope="col">Seen</th><th scope="col">Good PEC</th><th scope="col">CCount</th><th scope="col">Jumps</th><th scope="col">Factory SID</th><th scope="col">Flags</th><th scope="col">Die &deg;C</th><th scope="col" title="Discharge (DCC) bits from the per-IC frame">Discharging</th></tr></thead>
           <tbody id="chainTableBody"></tbody>
         </table>
       </div>
@@ -379,7 +393,8 @@
 </main>
 
 <footer>
-  Read-only monitor. It never writes configuration, never touches balancing and never clears registers.
+  Read-only monitor unless started with <code>--allow-tx</code>, which enables only the balance test toggle.
+  It never writes configuration and never clears registers.
   State of charge and balancing come from the controller; this tool only displays them.
 </footer>
 

@@ -200,6 +200,54 @@ class TestF105Validity(unittest.TestCase):
         self.assertIsNone(reading.flags, "no report must not read as 'no flags'")
 
 
+class TestF105DropoutLog(unittest.TestCase):
+    """Each IC left out of a cycle gets one raw-console line saying why."""
+
+    def setUp(self):
+        self.h = F105Harness()
+        self.lines = []
+        self.h.source.subscribe(lambda kind, payload:
+                                self.lines.append(payload) if kind == "line" else None)
+
+    def dropouts(self):
+        return [l for l in self.lines if "left out of this cycle" in l]
+
+    def test_healthy_cycles_log_nothing(self):
+        self.h.run(0, 12)
+        self.assertEqual(self.dropouts(), [])
+
+    def test_a_lost_cell_frame_is_named(self):
+        self.h.run(0, 3)
+        self.h.feed([f for f in f105_cycle(3) if f[0] != F.ID_CELLS_BASE + 4])
+        self.h.run(4, 1)
+        self.assertEqual(len(self.dropouts()), 1, self.lines)
+        self.assertIn("IC2 left out", self.dropouts()[0])
+        self.assertIn("0x704 never arrived", self.dropouts()[0])
+
+    def test_a_frame_shared_by_both_ics_drops_both(self):
+        self.h.run(0, 3)
+        self.h.feed([f for f in f105_cycle(3) if f[0] != F.ID_CELLS_BASE + 2])
+        self.h.run(4, 1)
+        text = " | ".join(self.dropouts())
+        self.assertIn("IC1 left out", text)
+        self.assertIn("IC2 left out", text)
+        self.assertEqual(text.count("0x702 never arrived"), 2)
+
+    def test_a_flagged_ic_says_so(self):
+        self.h.run(0, 3)
+        self.h.run(3, 1, invalid_ics=0b10)
+        self.h.run(4, 1)
+        self.assertEqual(len(self.dropouts()), 1, self.lines)
+        self.assertIn("IC2 left out", self.dropouts()[0])
+        self.assertIn("flagged it invalid in 0x6FF", self.dropouts()[0])
+
+    def test_lines_carry_a_millisecond_time(self):
+        self.h.run(0, 3)
+        self.h.run(3, 1, invalid_ics=0b10)
+        self.h.run(4, 1)
+        self.assertRegex(self.dropouts()[0], r"^can: \d\d:\d\d:\d\d\.\d{3} IC2 ")
+
+
 class TestF105Diagnostics(unittest.TestCase):
     def test_per_ic_flags_and_die_temp_reach_the_chain_view(self):
         h = F105Harness()
@@ -211,6 +259,33 @@ class TestF105Diagnostics(unittest.TestCase):
         self.assertAlmostEqual(chain[1]["die_temp_c"], 31.2)
         self.assertEqual(sorted(chain[2]["flags"]), ["any_uv", "thsd"])
         self.assertIs(chain[2]["status_ok"], True)
+
+    def test_dcc_bits_reach_the_chain_view_and_the_pack(self):
+        h = F105Harness()
+        h.run(0, 5)
+        frames = [f for f in f105_cycle(5) if f[0] != F.ID_IC_BASE + 1]
+        frames.append(F.encode_ic_status(1, 0, 9, 0, 30.0, 1 << 5))
+        h.feed(frames)
+        h.run(6, 1)
+        chain = {c["ic"]: c for c in h.hub.stats()["chain"]}
+        self.assertEqual(chain[1]["balance_mask"], 0)
+        self.assertEqual(chain[2]["balance_mask"], 1 << 5)
+        ics = {e["ic"]: e for e in h.packs[-1].to_json()["ics"]}
+        self.assertEqual(ics[2]["balance_mask"], 1 << 5)
+
+    def test_dcc_bits_are_unknown_when_the_status_read_failed(self):
+        h = F105Harness()
+        h.run(0, 5)
+        h.feed(f105_cycle(5, ic_bits={1: F.IC_PEC_FAIL}))
+        h.run(6, 1)
+        chain = {c["ic"]: c for c in h.hub.stats()["chain"]}
+        self.assertIsNone(chain[2]["balance_mask"])
+
+    def test_dcc_bits_are_unknown_before_any_per_ic_frame(self):
+        h = F105Harness()
+        h.run(1, 3)
+        chain = {c["ic"]: c for c in h.hub.stats()["chain"]}
+        self.assertIsNone(chain[1]["balance_mask"])
 
     def test_the_f105_unknown_die_temperature_is_not_3276_degrees(self):
         _, data = ic_frame(0, 0, 7, 0, F105_TEMP_UNKNOWN)

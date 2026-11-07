@@ -1,9 +1,11 @@
 # BMS Monitor
 
-A read-only display for the BMS. It runs on your laptop, connects to the BMS
+A display for the BMS. It runs on your laptop, connects to the BMS
 over CAN or USB, and shows the pack in your browser: every cell voltage, the
 pack voltage, the spread between the highest and lowest cell, temperatures,
-and which ICs are responding. It never sends configuration to the BMS.
+and which ICs are responding. It never sends configuration to the BMS, and
+it is read-only unless you start it with `--allow-tx` (CAN only), which adds
+a balancing toggle. See [CAN](docs/can.md#balancing).
 
 ## Install
 

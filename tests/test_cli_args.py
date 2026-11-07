@@ -67,6 +67,12 @@ class TestValidation(unittest.TestCase):
         for bad in ("0", "-1", "17"):
             self.assertEqual(self.run_cli("--ics-per-segment", bad), 2, bad)
 
+    def test_allow_tx_is_refused_off_can(self):
+        self.assertEqual(self.run_cli("--allow-tx"), 2)
+
+    def test_transmit_is_off_by_default(self):
+        self.assertFalse(parse("--source", "can").allow_tx)
+
 
 if __name__ == "__main__":
     unittest.main()

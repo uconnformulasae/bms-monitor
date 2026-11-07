@@ -2,17 +2,26 @@
 
 SSE because the stream is one-way and ``EventSource`` reconnects by itself.
 ``static/`` is plain HTML/CSS/JS with no CDN links, since there's no wifi in
-the paddock (``tests/test_readonly.py`` checks this). GET only: every other
-method gets a 405, and no endpoint can send anything to the BMS.
+the paddock (``tests/test_readonly.py`` checks this).
+
+GET only by default: every other method gets a 405 and no endpoint can send
+anything to the BMS. With ``--allow-tx`` there is exactly one POST,
+``/api/balance-test``, and it only queues the balance test toggle through
+``can_command_gate``. Because any web page open in the same browser can POST
+to 127.0.0.1, it needs a per-run token (handed out in ``/api/snapshot``,
+which other origins can't read), a loopback Host header (DNS rebinding) and
+a same-origin Origin header.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
 import posixpath
 import queue
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +34,11 @@ HEARTBEAT_S = 1.0
 #: How long an SSE client waits for data before we send a keep-alive. The
 #: keep-alive write is what notices a dead connection.
 _SSE_POLL_S = 0.5
+
+#: The only POST endpoint, and only with --allow-tx.
+BALANCE_TEST_PATH = "/api/balance-test"
+TOKEN_HEADER = "X-BMS-Token"
+MAX_POST_BYTES = 256
 
 
 def _guess_type(path: str) -> str:
@@ -77,7 +91,7 @@ class _Handler(BaseHTTPRequestHandler):
             if path in ("/", "/index.html"):
                 return self._serve_static("index.html")
             if path == "/api/snapshot":
-                return self._send_json(self.server.hub.snapshot())
+                return self._serve_snapshot()
             if path == "/api/status":
                 return self._send_json(self.server.hub.stats())
             if path == "/api/export.csv":
@@ -104,13 +118,76 @@ class _Handler(BaseHTTPRequestHandler):
             405,
         )
 
-    do_POST = do_PUT = do_DELETE = do_PATCH = _reject
+    do_PUT = do_DELETE = do_PATCH = _reject
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        control = self.server.tx_control
+        # An error reply can leave the body unread, so don't reuse the
+        # connection for another request.
+        self.close_connection = True
+        if control is None or path != BALANCE_TEST_PATH:
+            return self._reject()
+        try:
+            self._serve_balance_test(control)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_HEAD(self):
         # Treat HEAD like GET so a simple health check works.
         self.do_GET()
 
     # -- handlers ----------------------------------------------------------
+
+    def _serve_snapshot(self):
+        data = self.server.hub.snapshot()
+        if self.server.tx_control is not None:
+            data["tx"] = {"balance_test": True, "token": self.server.tx_token,
+                          "path": BALANCE_TEST_PATH}
+        return self._send_json(data)
+
+    def _same_origin(self) -> bool:
+        """Host must be this server's loopback address, and Origin (sent by
+        browsers on every POST) must match it."""
+        port = self.server.server_address[1]
+        allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+        host = self.headers.get("Host", "")
+        if host not in allowed_hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin != "http://" + host:
+            return False
+        site = self.headers.get("Sec-Fetch-Site")
+        return site in (None, "same-origin")
+
+    def _serve_balance_test(self, control):
+        from ..sources.can_command_gate import CanCommandRejected
+
+        if not self._same_origin():
+            return self._send_json({"error": "cross-origin request refused"}, 403)
+        token = self.headers.get(TOKEN_HEADER, "")
+        if not hmac.compare_digest(token.encode("utf-8"), self.server.tx_token.encode("utf-8")):
+            return self._send_json({"error": "missing or wrong %s" % TOKEN_HEADER}, 403)
+        ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            return self._send_json({"error": "Content-Type must be application/json"}, 415)
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._send_json({"error": "Content-Length required"}, 411)
+        if length < 0 or length > MAX_POST_BYTES:
+            return self._send_json({"error": "body too large"}, 413)
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return self._send_json({"error": "body must be JSON"}, 400)
+        if not isinstance(body, dict) or set(body) != {"enable"}:
+            return self._send_json({"error": 'body must be {"enable": true|false}'}, 400)
+        try:
+            control.request(body["enable"])
+        except CanCommandRejected as exc:
+            return self._send_json({"error": str(exc)}, 400)
+        return self._send_json({"requested": body["enable"]}, 202)
 
     def _serve_export(self):
         """Serve the retained history as a CSV download.
@@ -193,12 +270,15 @@ class _QuietThreadingHTTPServer(ThreadingHTTPServer):
 class MonitorServer:
     """Owns the HTTP server thread and the heartbeat thread."""
 
-    def __init__(self, hub, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(self, hub, host: str = "127.0.0.1", port: int = 8765,
+                 tx_control=None):
         # The CLI always binds 127.0.0.1. There's no authentication, so
         # this shouldn't be reachable from the network.
         self.hub = hub
         self.httpd = _QuietThreadingHTTPServer((host, port), _Handler)
         self.httpd.hub = hub
+        self.httpd.tx_control = tx_control
+        self.httpd.tx_token = secrets.token_urlsafe(24)
         self.httpd.stopping = threading.Event()
         self.host, self.port = self.httpd.server_address[0], self.httpd.server_address[1]
         self._threads = []

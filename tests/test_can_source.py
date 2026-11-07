@@ -81,17 +81,18 @@ class TestCanRobustness(unittest.TestCase):
         public = {n for n in dir(CanSource) if not n.startswith("_")}
         self.assertEqual(public, {"start", "stop", "subscribe", "status", "name"})
 
-    def test_can_source_module_never_sends(self):
-        """The CAN backend is read-only too: no .send( calls anywhere."""
+    def test_the_only_send_is_fed_by_the_gate(self):
+        """One .send( in the CAN backend, and its frames come from the
+        balance test control (which builds them in can_command_gate)."""
         import inspect
 
         from bms_monitor.sources import can_source
         src = inspect.getsource(can_source)
-        for line in src.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#") or stripped.startswith("*"):
-                continue
-            self.assertNotIn(".send(", line, line)
+        sends = [line.strip() for line in src.splitlines()
+                 if ".send(" in line and not line.strip().startswith("#")]
+        self.assertEqual(sends, ["bus.send(message, timeout=0.2)"])
+        self.assertIn("for can_id, data in self._tx.take():", src)
+        self.assertNotIn("can.Message(", src.replace("can_module.Message(", ""))
 
 
 if __name__ == "__main__":

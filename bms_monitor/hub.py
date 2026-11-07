@@ -310,6 +310,7 @@ class Hub:
                 "die_temp_c": last.die_temp_c if last is not None else None,
                 "invalid_run": last.invalid_run if last is not None else None,
                 "status_ok": last.status_ok if last is not None else None,
+                "balance_mask": last.balance_mask if last is not None else None,
             })
         return out
 

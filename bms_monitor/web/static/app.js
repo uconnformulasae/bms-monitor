@@ -39,6 +39,10 @@
     packs: [], aux: [], consoleLines: [],
     canTemps: null, canTempHist: [],
     stats: null, summary: null, config: Object.assign({}, DEFAULTS),
+    /* Balance test (--allow-tx only): what we last asked for, and when. */
+    tx: null, balRequested: null, balRequestedAt: 0, balError: '', balBusy: false,
+    /* Latest pack read while nothing was discharging, for the balancing target. */
+    balRestPack: null,
     tab: 'live',
     windowS: 30, chgWindowS: 120,
     pinned: null, paused: false, hoverX: null, connected: false,
@@ -193,6 +197,7 @@
       .then((r) => r.json())
       .then((data) => {
         applyConfig(data.config);
+        state.tx = (data.tx && data.tx.balance_test) ? data.tx : null;
         state.packs = [];
         for (const p of data.samples) pushPack(p);
         state.aux = [];
@@ -295,6 +300,8 @@
      * look like a dead one. */
     renderStatusBar();
     renderBanner();
+    /* A control, so it keeps updating while the charts are paused. */
+    renderBalance();
     if (state.paused) return;
     if (state.mode === 'replay') syncReplayBar();
     if (state.tab === 'live') renderLive();
@@ -302,6 +309,180 @@
     else if (state.tab === 'temps') renderTemps();
     else if (state.tab === 'chain') renderChain();
     else if (state.tab === 'console') renderConsole();
+  }
+
+  /* ------------------------------------------------- balance test */
+
+  /* How long a request outranks what the controller reports, so the button
+   * doesn't flick back before the next 0x6FF (10 Hz) confirms it. */
+  const BAL_SETTLE_MS = 1500;
+
+  function balanceFirmwareOn(sum) {
+    return !!sum && typeof sum.balance_state === 'string' && sum.balance_state !== 'off';
+  }
+
+  /* Hottest die the chain table knows about, as text, or ''. */
+  function hottestDie() {
+    let best = null;
+    for (const c of ((state.stats || {}).chain || [])) {
+      if (typeof c.die_temp_c === 'number' && (!best || c.die_temp_c > best.die_temp_c)) best = c;
+    }
+    return best ? 'Hottest die: IC' + best.ic + ' at ' + best.die_temp_c.toFixed(1) + ' \u00b0C.' : '';
+  }
+
+  /* Cells the controller is discharging now, keyed for the grid and table. */
+  function currentDischarge() {
+    const st = state.stats || {};
+    const live = state.mode !== 'replay' && state.connected
+      && !!st.link && st.link.link === 'up' && st.data_state === 'live';
+    const cells = C.dischargingCells(state.summary, latestPack(), live);
+    const byKey = {};
+    for (const c of cells) byKey[c.key] = c;
+    return { cells: cells, byKey: byKey };
+  }
+
+  /* "Target 3.5960 V (IC1 cell 1 + 1.0 mV). Above it at the last rest: ..." */
+  function balanceProgressText(sum) {
+    const p = C.balanceProgress(sum, state.balRestPack);
+    if (!p) return '';
+    let text = 'Target ' + p.target.toFixed(4) + ' V (IC' + p.lowest.ic + ' cell ' + p.lowest.cell
+      + ' + ' + sum.balance_margin_mv.toFixed(1) + ' mV).';
+    if (p.above.length) {
+      const shown = p.above.slice(0, 5).map((a) => 'IC' + a.ic + ' C' + a.cell + ' +' + a.mv.toFixed(1) + ' mV');
+      text += ' Above it at the last rest: ' + shown.join(', ')
+        + (p.above.length > 5 ? ', and ' + (p.above.length - 5) + ' more' : '') + '.';
+    }
+    return text;
+  }
+
+  function renderBalance() {
+    const panel = $('balancePanel');
+    if (!state.tx) { panel.hidden = true; return; }
+    panel.hidden = false;
+
+    const sum = state.summary || {};
+    const haveStatus = typeof sum.balance_state === 'string';
+    /* Readings sag while discharging, so progress comes from a rest reading. */
+    if (haveStatus && sum.balance_state !== 'discharging' && latestPack()) {
+      state.balRestPack = latestPack();
+    }
+    const st = state.stats || {};
+    const linkUp = state.connected && st.link && st.link.link === 'up';
+    const settling = state.balRequested !== null
+      && (Date.now() - state.balRequestedAt) < BAL_SETTLE_MS;
+
+    /* The controller is the authority on whether the test is armed. Our own
+     * request only wins while it is in flight. */
+    const on = settling ? state.balRequested : balanceFirmwareOn(sum);
+    const btn = $('balToggle');
+    btn.setAttribute('aria-pressed', String(on));
+    setText(btn, on ? 'On' : 'Off');
+    btn.disabled = state.balBusy || !linkUp;
+
+    let text = '';
+    let cls = '';
+    let detail = '';
+    if (!linkUp) {
+      text = 'CAN link is down.';
+      cls = 'bad';
+    } else if (!haveStatus) {
+      text = 'Waiting for the controller\'s chain status (0x6FF)...';
+    } else if (state.balRequested === true && !settling && sum.balance_state === 'off') {
+      text = 'No response from the controller.';
+      cls = 'bad';
+      detail = 'Its firmware may not have the balance test, or 0x740 is not reaching it.';
+    } else {
+      switch (sum.balance_state) {
+        case 'off':
+          text = settling ? 'Sending...' : 'Off.';
+          detail = 'Turn on to discharge the groups above the lowest until they are within the margin.';
+          break;
+        case 'pending':
+          text = 'Armed, waiting for the next measurement cycle...';
+          cls = 'active';
+          break;
+        case 'discharging': {
+          const n = currentDischarge().cells.length;
+          text = 'Discharging ' + (n ? n + ' group' + (n === 1 ? '' : 's') : 'the high groups') + '.';
+          cls = 'active';
+          detail = [balanceProgressText(sum), hottestDie(),
+                    'Stops by itself at 80 \u00b0C for over 5 s.'].filter(Boolean).join(' ');
+          break;
+        }
+        case 'resting':
+          text = 'Resting so the readings recover from the sag, then measuring again...';
+          cls = 'active';
+          detail = [balanceProgressText(sum), hottestDie()].filter(Boolean).join(' ');
+          break;
+        case 'balanced':
+          text = 'Balanced: every group is within '
+            + (typeof sum.balance_margin_mv === 'number' ? sum.balance_margin_mv.toFixed(1) + ' mV' : 'the margin')
+            + ' of ' + (sum.balance_ic && sum.balance_cell ? 'IC' + sum.balance_ic + ' cell ' + sum.balance_cell : 'the lowest group') + '.';
+          detail = 'Turn off, then on, to check again.';
+          break;
+        case 'refused':
+          text = 'Refused: not every IC had valid data, or the DCC bits did not read back.';
+          cls = 'bad';
+          detail = 'Nothing was discharged. Turn off, then on, to try again.';
+          break;
+        case 'aborted':
+          text = 'Aborted: the chain reset during the discharge.';
+          cls = 'bad';
+          detail = 'Discharge was cleared. Turn off, then on, to try again.';
+          break;
+        case 'too_hot':
+          text = 'Stopped: ' + (sum.balance_ic ? 'IC' + sum.balance_ic + '\'s' : 'a')
+            + ' die was 80 \u00b0C or more (or unreadable) for over 5 s.';
+          cls = 'bad';
+          detail = hottestDie() + ' Turn off, then on, to start again.';
+          break;
+        case 'cell_low':
+          text = 'Stopped: '
+            + (sum.balance_ic && sum.balance_cell ? 'IC' + sum.balance_ic + ' cell ' + sum.balance_cell : 'a cell')
+            + ' reached the undervoltage threshold.';
+          cls = 'bad';
+          detail = 'Turn off, then on, to start again.';
+          break;
+        default:
+          text = 'Unknown balance state from the controller.';
+          cls = 'bad';
+      }
+    }
+    if (state.balError) {
+      detail = state.balError;
+      cls = 'bad';
+    }
+    const status = $('balStatus');
+    setText(status, text);
+    status.className = 'balstatus' + (cls ? ' ' + cls : '');
+    setText($('balDetail'), detail);
+  }
+
+  function sendBalance(enable) {
+    if (!state.tx || state.balBusy) return;
+    if (enable && !window.confirm('Balance the pack? The groups above the lowest are discharged until they are within the margin.')) return;
+    state.balBusy = true;
+    state.balError = '';
+    scheduleRender();
+    fetch(state.tx.path, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-BMS-Token': state.tx.token },
+      body: JSON.stringify({ enable: enable })
+    })
+      .then((r) => r.json().then((body) => ({ ok: r.ok, body: body })))
+      .then((res) => {
+        if (!res.ok) throw new Error(res.body && res.body.error ? res.body.error : 'request failed');
+        state.balRequested = enable;
+        state.balRequestedAt = Date.now();
+      })
+      .catch((err) => { state.balError = 'Not sent: ' + err.message; })
+      .then(() => {
+        state.balBusy = false;
+        scheduleRender();
+        /* Re-check once the settle window ends, even if no frame arrives. */
+        setTimeout(scheduleRender, BAL_SETTLE_MS + 50);
+      });
   }
 
   /* One word for the whole transport, worst layer first. LIVE only if every
@@ -493,16 +674,29 @@
         d.className = 'icbox';
         d.appendChild(document.createElement('b'));
         d.appendChild(document.createElement('span'));
+        const extra = document.createElement('small');
+        extra.className = 'icextra';
+        d.appendChild(extra);
         strip.appendChild(d);
       }
     }
     const per = cfg().ics_per_segment || 2;
     const words = { ok: 'ok', pec: 'PEC ERR', silent: 'SILENT', intermittent: 'flaky', unknown: '–' };
+    const discharge = currentDischarge();
     for (let i = 0; i < chain.length; i++) {
       const c = chain[i];
       const box = strip.children[i];
       const fw = flagWords(c.flags);
-      box.className = 'icbox ' + c.state + (fw.length ? ' flagged' : '');
+      const bal = discharge.cells.filter((d) => d.ic === c.ic).map((d) => 'C' + d.cell);
+      box.className = 'icbox ' + c.state + (fw.length ? ' flagged' : '') + (bal.length ? ' balancing' : '');
+      /* Die temperature on the box itself, plus any cell being discharged. */
+      const die = (typeof c.die_temp_c === 'number')
+        ? c.die_temp_c.toFixed(1) + ' \u00b0C'
+        : (c.status_ok === false ? 'die ? \u00b0C' : '');
+      const cpi = (latestPack() || {}).cells_per_ic;
+      const balText = bal.length && bal.length === cpi ? 'all' : bal.join(' ');
+      setText(box.children[2], [die, bal.length ? '\u21af ' + balText : '']
+        .filter(Boolean).join(' \u00b7 '));
       setText(box.children[0], 'IC' + c.ic);
       setText(box.children[1], words[c.state] + ' · S' + (Math.floor((c.ic - 1) / per) + 1)
         + (fw.length ? ' · ' + fw.join(' ') : ''));
@@ -512,7 +706,8 @@
         + (c.jumps ? ', ' + c.jumps + ' counter jump(s)' : '')
         + (fw.length ? '\nController flags: ' + fw.join(', ') : '')
         + (c.status_ok === false ? '\nController status read failed PEC: flags unknown' : '')
-        + (c.die_temp_c === null || c.die_temp_c === undefined ? '' : '\nDie ' + c.die_temp_c.toFixed(1) + ' \u00b0C');
+        + (c.die_temp_c === null || c.die_temp_c === undefined ? '' : '\nDie ' + c.die_temp_c.toFixed(1) + ' \u00b0C')
+        + (bal.length ? '\nDischarging ' + bal.join(', ') : '');
     }
     setText($('chainHint'), chain.length + ' IC(s) · ' + (cfg().cells_per_ic)
       + ' populated cells each · grouped S1..Sn by segment board');
@@ -715,6 +910,7 @@
       maxDev = Math.max(maxDev, Math.abs(c.v - stats.mean) * 1000);
     }
     const refMv = Math.max(4, Math.min(60, Math.ceil(maxDev)));
+    const discharge = currentDischarge();
 
     /* Only rebuild when the shape changes; otherwise update in place. */
     const signature = ics + ':' + cpi + ':' + per;
@@ -807,11 +1003,14 @@
         if (key === stats.min.key) btn.classList.add('cg-min');
         if (key === stats.max.key) btn.classList.add('cg-max');
         if (state.pinned === key) btn.classList.add('cg-pinned');
+        const bal = discharge.byKey[key];
+        if (bal) btn.classList.add('cg-bal');
 
         btn.title = 'IC' + ic + ' C' + i + ' · S' + seg + '\n'
           + v.toFixed(4) + ' V · ' + (dev >= 0 ? '+' : '') + dev.toFixed(1) + ' mV vs mean'
           + (uv ? '\nUNDER-VOLTAGE flag set' : '')
           + (ov ? '\nOVER-VOLTAGE flag set' : '')
+          + (bal ? '\nDISCHARGING (' + (bal.source === '0x6FF' ? 'balance test' : 'DCC bit') + ')' : '')
           + '\nclick to pin on the time series';
       }
     }
@@ -823,7 +1022,10 @@
         if (Number(fields['C' + c.cell + 'OV'])) flagged.push('IC' + c.ic + ' C' + c.cell + ' OV');
       }
     }
-    setText(legend, (degraded
+    const balText = discharge.cells.length
+      ? '\u21af Discharging: ' + discharge.cells.map((d) => 'IC' + d.ic + ' C' + d.cell).join(', ') + '. '
+      : '';
+    setText(legend, balText + (degraded
         ? 'Live cycle is incomplete — values shown are from the last complete one '
           + ((cursor() - usable.t).toFixed(1)) + ' s ago. '
         : '')
@@ -863,6 +1065,7 @@
     const rankOf = {};
     ranked.forEach((c, i) => { rankOf[c.key] = i + 1; });
     const rows = state.tableSort === 'voltage' ? ranked : stats.cells;
+    const discharge = currentDischarge();
 
     if (body.childElementCount !== rows.length) {
       while (body.firstChild) body.removeChild(body.firstChild);
@@ -875,9 +1078,12 @@
     for (let i = 0; i < rows.length; i++) {
       const c = rows[i];
       const tr = body.children[i];
-      tr.className = c.key === stats.min.key ? 'is-min' : (c.key === stats.max.key ? 'is-max' : '');
+      const bal = !!discharge.byKey[c.key];
+      tr.className = (c.key === stats.min.key ? 'is-min' : (c.key === stats.max.key ? 'is-max' : ''))
+        + (bal ? ' is-bal' : '');
       const td = tr.children;
-      setText(td[0], 'IC' + c.ic + ' C' + c.cell + (state.pinned === c.key ? ' ●' : ''));
+      setText(td[0], 'IC' + c.ic + ' C' + c.cell + (state.pinned === c.key ? ' ●' : '')
+        + (bal ? ' \u21af discharging' : ''));
       setText(td[1], c.v.toFixed(4));
       const dev = (c.v - stats.mean) * 1000;
       setText(td[2], (dev >= 0 ? '+' : '') + dev.toFixed(1));
@@ -1363,7 +1569,7 @@
       while (body.firstChild) body.removeChild(body.firstChild);
       for (let i = 0; i < chain.length; i++) {
         const tr = document.createElement('tr');
-        for (let k = 0; k < 10; k++) tr.appendChild(document.createElement('td'));
+        for (let k = 0; k < 11; k++) tr.appendChild(document.createElement('td'));
         body.appendChild(tr);
       }
     }
@@ -1391,6 +1597,11 @@
       td[8].className = (fw.length || c.status_ok === false) ? 'flag-bad' : '';
       setText(td[9], c.die_temp_c === null || c.die_temp_c === undefined
         ? '\u2013' : c.die_temp_c.toFixed(1));
+      /* DCC bits from the per-IC frame (2 Hz). Dash = not reported. */
+      const dcc = C.dccChannels(c.balance_mask);
+      setText(td[10], c.balance_mask === null || c.balance_mask === undefined
+        ? '\u2013' : (dcc.length ? '\u21af ' + dcc.join(', ') : 'none'));
+      td[10].className = dcc.length ? 'flag-bal' : '';
     }
 
     const list = $('transportStats');
@@ -1595,6 +1806,10 @@
         scheduleRender();
       });
     }
+
+    $('balToggle').addEventListener('click', function () {
+      sendBalance(this.getAttribute('aria-pressed') !== 'true');
+    });
 
     $('btnPause').addEventListener('click', function () {
       state.paused = !state.paused;

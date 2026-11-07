@@ -16,6 +16,8 @@ failed. Without 0x6FF, a chip needs a fresh per-IC frame with no pec_fail.
 from __future__ import annotations
 
 import datetime
+import re
+import sys
 import threading
 import time
 from typing import Optional
@@ -57,6 +59,34 @@ ODD_LOG_LIMIT = 20
 DEFAULT_INTERFACE = "socketcan"
 DEFAULT_CHANNEL = "can0"
 DEFAULT_BITRATE = 250000
+
+_COM_PORT = re.compile(r"COM\d+", re.I)
+
+
+def normalize_slcan_channel(channel: str) -> tuple[str, Optional[str]]:
+    """Map macOS-style device paths to a Windows COM name when needed.
+
+    People often paste ``/dev/cu.usbserial-COM3`` from the docs; on Windows the
+    slcan backend needs ``COM3``.
+    """
+    if sys.platform != "win32":
+        return channel, None
+    match = _COM_PORT.search(channel)
+    if match:
+        fixed = match.group(0).upper()
+        if fixed == channel:
+            return channel, None
+        return fixed, "%s on Windows (not %r)" % (fixed, channel)
+    if channel.startswith("/dev/"):
+        try:
+            from serial.tools import list_ports
+            ports = [p.device for p in list_ports.comports()]
+        except Exception:
+            ports = []
+        if len(ports) == 1:
+            return ports[0], "only serial port found (%s); %r is invalid on Windows" % (
+                ports[0], channel)
+    return channel, None
 
 
 def _stamp() -> str:

@@ -291,6 +291,12 @@ def main(argv=None) -> int:
         from .sources.can_command_gate import BalanceTestControl
         tx_control = BalanceTestControl()
 
+    can_channel_note = None
+    if args.source == "can" and args.can_interface == "slcan":
+        from .sources.can_source import normalize_slcan_channel
+        fixed, can_channel_note = normalize_slcan_channel(args.can_channel)
+        args.can_channel = fixed
+
     hub = Hub(history=max(100, args.history), csv_logger=csv_logger,
               ui_config=_ui_config(args, poll_plan), temp_csv_logger=temp_csv_logger)
 
@@ -354,6 +360,8 @@ def main(argv=None) -> int:
     elif args.source == "can":
         print("  bus        : %s:%s @ %d" % (args.can_interface, args.can_channel,
                                              args.can_bitrate))
+        if can_channel_note:
+            print("  note       : %s" % can_channel_note)
         print("  chain      : %d IC(s) x %d populated cells = %d cells"
               % (args.ics, args.cells_per_ic, args.ics * args.cells_per_ic))
         print("  transmit   : %s" % ("balance test toggle (0x740), from the dashboard"

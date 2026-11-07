@@ -262,7 +262,8 @@ class _QuietThreadingHTTPServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         import sys as _sys
         exc = _sys.exc_info()[1]
-        if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                            ConnectionAbortedError, TimeoutError)):
             return
         super().handle_error(request, client_address)
 

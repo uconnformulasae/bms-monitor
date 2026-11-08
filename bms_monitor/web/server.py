@@ -95,6 +95,20 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._serve_snapshot()
             if path == "/api/status":
                 return self._send_json(self.server.hub.stats())
+            if path == "/api/log/start":
+                return self._serve_log_start()
+            if path == "/api/log/stop":
+                return self._serve_log_stop()
+            if path == "/api/log/status":
+                return self._send_json(self.server.hub.logging_status())
+            if path == "/api/log/download":
+                return self._serve_log_download()
+            if path == "/api/freeze-frames":
+                return self._send_json({"frames": self.server.hub.freeze_frames()})
+            if path == "/api/freeze-frame":
+                return self._serve_freeze_frame()
+            if path == "/api/freeze-frame/capture":
+                return self._serve_freeze_frame_capture()
             if path == "/api/export.csv":
                 return self._serve_export()
             if path == "/api/stream":
@@ -124,8 +138,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         control = self.server.tx_control
-        # An error reply can leave the body unread, so don't reuse the
-        # connection for another request.
         self.close_connection = True
         if control is None or path != BALANCE_TEST_PATH:
             return self._reject()
@@ -189,6 +201,61 @@ class _Handler(BaseHTTPRequestHandler):
         except CanCommandRejected as exc:
             return self._send_json({"error": str(exc)}, 400)
         return self._send_json({"requested": body["enable"]}, 202)
+
+    def _serve_log_start(self):
+        if not self._same_origin():
+            return self._send_json({"error": "cross-origin request refused"}, 403)
+        status = self.server.hub.start_logging()
+        return self._send_json({"ok": True, "status": status})
+
+    def _serve_log_stop(self):
+        if not self._same_origin():
+            return self._send_json({"error": "cross-origin request refused"}, 403)
+        status = self.server.hub.stop_logging()
+        return self._send_json({"ok": True, "status": status})
+
+    def _serve_log_download(self):
+        filepath = self.server.hub.get_latest_log_path()
+        if not filepath or not os.path.exists(filepath):
+            return self._send_json({"error": "no log file available"}, 404)
+        filename = os.path.basename(filepath)
+        try:
+            with open(filepath, "rb") as fh:
+                body = fh.read()
+        except OSError as exc:
+            return self._send_json({"error": str(exc)}, 500)
+        self._send(200, body, "text/csv; charset=utf-8", extra={
+            "Content-Disposition": 'attachment; filename="%s"' % filename,
+        })
+
+    def _serve_freeze_frame(self):
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        params = {}
+        for part in query.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                params[k] = v
+        frame_id = params.get("id")
+        if frame_id:
+            frame = self.server.hub.get_freeze_frame(frame_id)
+            if frame is None:
+                return self._send_json({"error": "freeze frame not found", "id": frame_id}, 404)
+            return self._send_json(frame)
+        latest = self.server.hub.latest_freeze_frame()
+        if latest is None:
+            return self._send_json({"error": "no freeze frame recorded"}, 404)
+        return self._send_json(latest)
+
+    def _serve_freeze_frame_capture(self):
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        params = {}
+        for part in query.split("&"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                params[k] = v
+        reason = params.get("reason", "Manual trigger via dashboard")
+        frame = self.server.hub.capture_freeze_frame(reason=reason, source="manual")
+        return self._send_json({"captured": frame is not None, "frame": frame})
 
     def _serve_export(self):
         """Serve the retained history as a CSV download.

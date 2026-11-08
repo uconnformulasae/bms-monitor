@@ -766,6 +766,18 @@ function drawTimeSeries(canvas, state) {
   if (!win.length) { drawEmpty(ctx, w, h, t, 'No samples in this window'); return null; }
 
   const x0d = tEnd - state.windowS, x1d = tEnd;
+  canvas._plot = {
+    x0: plot.x0,
+    x1: plot.x1,
+    y0: plot.y0,
+    y1: plot.y1,
+    x0d: x0d,
+    x1d: x1d,
+    tEnd: tEnd,
+    windowS: state.windowS,
+    allTMin: all[0].t,
+    allTMax: all[all.length - 1].t
+  };
 
   /* Follows the cell view's drill-down: only that board's cells are drawn
    * and the autoscale narrows to them. Ninety lines on one axis is
@@ -849,20 +861,50 @@ function drawTimeSeries(canvas, state) {
   const emphasised = {};
   if (minKey) emphasised[minKey] = t.s1;
   if (maxKey) emphasised[maxKey] = t.s2;
-  if (state.pinned) emphasised[state.pinned] = emphasised[state.pinned] || t.ink2;
+  if (state.pinned) emphasised[state.pinned] = '#facc15';
   for (const key in selected) emphasised[key] = emphasised[key] || t.ink2;
+
+  /* Shaded envelope band between min and max cell traces */
+  const envelope = [];
+  for (const p of win) {
+    if (!packUsable(p)) continue;
+    const s = focused
+      ? packStatsFor(p, (ic) => inScope[ic] === true)
+      : packStats(p);
+    if (!s) continue;
+    envelope.push({
+      x: scaleLinear(p.t, x0d, x1d, plot.x0, plot.x1),
+      yMin: scaleLinear(s.min.v, dom[0], dom[1], plot.y1, plot.y0),
+      yMax: scaleLinear(s.max.v, dom[0], dom[1], plot.y1, plot.y0)
+    });
+  }
+  if (envelope.length >= 2) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x0, plot.y0, plot.x1 - plot.x0, plot.y1 - plot.y0);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.moveTo(envelope[0].x, envelope[0].yMax);
+    for (let i = 1; i < envelope.length; i++) ctx.lineTo(envelope[i].x, envelope[i].yMax);
+    for (let i = envelope.length - 1; i >= 0; i--) ctx.lineTo(envelope[i].x, envelope[i].yMin);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(57, 135, 229, 0.08)';
+    ctx.fill();
+    ctx.restore();
+  }
 
   /* Context lines first so the emphasised ones draw on top. */
   if (!(anySelected && state.seriesMode === 'selected')) {
     for (const slot of slots) {
       if (emphasised[slot.key]) continue;
-      strokeSeries(slot, t.context, 1.5);
+      strokeSeries(slot, t.context, 1.2);
     }
   }
   for (const slot of slots) {
     const colour = emphasised[slot.key];
     if (!colour) continue;
-    strokeSeries(slot, colour, colour === t.ink2 ? 2 : 2.25);
+    const width = slot.key === state.pinned ? 2.5 : (colour === t.ink2 ? 2 : 2.25);
+    strokeSeries(slot, colour, width);
   }
 
   /* End labels in the right gutter, tagged with the IC. */
@@ -911,6 +953,25 @@ function drawTimeSeries(canvas, state) {
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(x, plot.y0); ctx.lineTo(x, plot.y1); ctx.stroke();
       ctx.setLineDash([]);
+
+      /* Highlight points under the cursor on primary traces */
+      const markerKeys = [minKey, maxKey, state.pinned].filter(Boolean);
+      for (const k of markerKeys) {
+        const m = /^IC(\d+)C(\d+)$/.exec(k);
+        if (!m) continue;
+        const v = valueFor(p, Number(m[1]), Number(m[2]));
+        if (v === null) continue;
+        const y = Math.round(scaleLinear(v, dom[0], dom[1], plot.y1, plot.y0)) + 0.5;
+        const col = k === state.pinned ? '#facc15' : (k === minKey ? t.s1 : t.s2);
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = col;
+        ctx.fill();
+        ctx.strokeStyle = t.surface;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
       hover = { pack: p, x: x, minKey: minKey, maxKey: maxKey, tEnd: tEnd };
     }
   }
@@ -1016,24 +1077,61 @@ function drawTrend(canvas, spec) {
       ctx.fillText(s.label, plot.x1 + 6, Math.max(plot.y0, Math.min(plot.y1, end.y)));
     }
   }
+
+  /* Optional synchronized crosshair cursor */
+  if (spec.hoverX !== undefined && spec.hoverX !== null && spec.hoverX >= plot.x0 && spec.hoverX <= plot.x1) {
+    const x = Math.round(spec.hoverX) + 0.5;
+    ctx.strokeStyle = t.axis; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, plot.y0); ctx.lineTo(x, plot.y1); ctx.stroke();
+    ctx.setLineDash([]);
+  } else if (spec.hoverT !== undefined && spec.hoverT !== null && spec.hoverT >= tMin && spec.hoverT <= tMax) {
+    const x = Math.round(scaleLinear(spec.hoverT, tMin, tMax, plot.x0, plot.x1)) + 0.5;
+    ctx.strokeStyle = t.axis; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, plot.y0); ctx.lineTo(x, plot.y1); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 }
 
-/* Sparkline for a stat tile. No axis or labels; the number next to it
- * gives the value. */
+/* Sparkline for a stat tile. Area fill + stroked line for high legibility. */
 function drawSparkline(canvas, values, colour) {
   const { ctx, w, h } = prepCanvas(canvas);
   const clean = values.filter((v) => typeof v === 'number' && isFinite(v));
   if (clean.length < 2) return;
   const dom = autoscale(clean, { pad: 0.15, minSpan: 0.002, fallback: [0, 1] });
-  ctx.strokeStyle = colour;
-  ctx.lineWidth = 1.5;
+  
   ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  const firstX = scaleLinear(0, 0, clean.length - 1, 1, w - 1);
+  const firstY = scaleLinear(clean[0], dom[0], dom[1], h - 2, 2);
+
+  /* Subtle area fill */
   ctx.beginPath();
-  for (let i = 0; i < clean.length; i++) {
+  ctx.moveTo(firstX, firstY);
+  for (let i = 1; i < clean.length; i++) {
     const x = scaleLinear(i, 0, clean.length - 1, 1, w - 1);
     const y = scaleLinear(clean[i], dom[0], dom[1], h - 2, 2);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    ctx.lineTo(x, y);
   }
+  const lastX = scaleLinear(clean.length - 1, 0, clean.length - 1, 1, w - 1);
+  ctx.lineTo(lastX, h);
+  ctx.lineTo(firstX, h);
+  ctx.closePath();
+  ctx.fillStyle = colour.startsWith('#')
+    ? colour + '18'
+    : 'rgba(255, 255, 255, 0.06)';
+  ctx.fill();
+
+  /* Stroke line */
+  ctx.beginPath();
+  ctx.moveTo(firstX, firstY);
+  for (let i = 1; i < clean.length; i++) {
+    const x = scaleLinear(i, 0, clean.length - 1, 1, w - 1);
+    const y = scaleLinear(clean[i], dom[0], dom[1], h - 2, 2);
+    ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 1.6;
   ctx.stroke();
 }
 

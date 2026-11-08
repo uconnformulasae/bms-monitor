@@ -158,6 +158,31 @@ class TestApi(WebTestCase):
         self.assertEqual(len(data["samples"]), 2)
         self.assertFalse(data["samples"][1]["pec_ok"])
 
+    def test_logging_endpoints(self):
+        status, body, _ = self.get("/api/log/status")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertFalse(data["active"])
+
+        status, body, _ = self.get("/api/log/start")
+        self.assertEqual(status, 200)
+        res = json.loads(body)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["status"]["active"])
+
+        self.hub._on_sample(sample(0))
+
+        status, body, _ = self.get("/api/log/stop")
+        self.assertEqual(status, 200)
+        res = json.loads(body)
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["status"]["active"])
+
+        status, body, headers = self.get("/api/log/download")
+        self.assertEqual(status, 200)
+        self.assertIn(b"timestamp,t_mono,source", body)
+        self.assertIn("Content-Disposition", headers)
+
 
 class TestSse(WebTestCase):
     def read_stream(self, seconds=2.0, want=1):

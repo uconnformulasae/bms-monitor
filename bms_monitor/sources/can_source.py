@@ -266,6 +266,16 @@ class CanSource(TelemetrySource):
                 return False
             self._tx.note_sent()
             self._emit("line", "can: %s TX 0x%03X %s" % (_stamp(), can_id, data.hex(" ")))
+            self._emit("can_frame", {
+                "t_wall": time.time(),
+                "t_mono": time.monotonic() - self._t0,
+                "id": can_id,
+                "id_hex": "0x%03X" % can_id,
+                "dlc": len(data),
+                "data_hex": data.hex().upper(),
+                "kind": "tx",
+                "details": "balance test cmd",
+            })
         return True
 
     def _tx_due(self) -> bool:
@@ -323,22 +333,39 @@ class CanSource(TelemetrySource):
         return (cells + F.CELLS_PER_FRAME - 1) // F.CELLS_PER_FRAME
 
     def _handle(self, message) -> None:
-        decoded = F.decode(message.arbitration_id, bytes(message.data))
+        raw_data = bytes(message.data)
+        can_id = message.arbitration_id
+        decoded = F.decode(can_id, raw_data)
+        now = time.monotonic() - self._t0
+        t_wall = time.time()
+
         if decoded is None:
             with self._lock:
-                key = "bad" if F.owns_id(message.arbitration_id) else "unknown"
+                key = "bad" if F.owns_id(can_id) else "unknown"
                 self._frames[key] += 1
                 logged = self._odd_logged
                 self._odd_logged += 1
             if logged < ODD_LOG_LIMIT:
                 self._emit("line", "can: %s %s frame 0x%03X %s" % (
-                    _stamp(), key, message.arbitration_id, bytes(message.data).hex(" ")))
+                    _stamp(), key, can_id, raw_data.hex(" ")))
+            self._emit("can_frame", {
+                "t_wall": t_wall, "t_mono": now, "id": can_id,
+                "id_hex": "0x%03X" % can_id, "dlc": len(raw_data),
+                "data_hex": raw_data.hex().upper(), "kind": key,
+                "details": "unrecognized or corrupt frame",
+            })
             return
 
         kind = decoded["kind"]
         with self._lock:
             self._frames[kind] = self._frames.get(kind, 0) + 1
-        now = time.monotonic() - self._t0
+
+        self._emit("can_frame", {
+            "t_wall": t_wall, "t_mono": now, "id": can_id,
+            "id_hex": "0x%03X" % can_id, "dlc": len(raw_data),
+            "data_hex": raw_data.hex().upper(), "kind": kind,
+            "details": "%s frame" % kind,
+        })
 
         if kind == "cells":
             self._handle_cells(decoded, now)

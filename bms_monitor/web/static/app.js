@@ -54,7 +54,14 @@
     mode: 'live',
     cursorT: null, playing: false, speed: 1,
     session: null, lastSession: null,
-    settingsOpen: false
+    settingsOpen: false,
+    logging: null, loggingBusy: false,
+    freezeFrames: [], activeFreezeFrame: null,
+    hoverTempX: null,
+    tempRateHistory: [],
+    followLive: true,
+    tsPanEnd: null,
+    isTsMaximized: false
   };
 
   let renderQueued = false;
@@ -215,6 +222,10 @@
         state.consoleLines = [];
         for (const line of data.raw_lines) pushConsole(line, lineClass(line));
         state.stats = data.stats;
+        if (data.freeze_frames) state.freezeFrames = data.freeze_frames;
+        else if (data.stats && data.stats.freeze_frames) state.freezeFrames = data.stats.freeze_frames;
+        if (data.logging) state.logging = data.logging;
+        else if (data.stats && data.stats.logging) state.logging = data.stats.logging;
         if (data.stats && data.stats.source) {
           state.mode = data.stats.source.mode === 'replay' ? 'replay' : 'live';
         }
@@ -265,6 +276,28 @@
       if (state.stats.summary && Object.keys(state.stats.summary).length) {
         state.summary = state.stats.summary;
       }
+      if (state.stats.logging) {
+        state.logging = state.stats.logging;
+      }
+      if (state.stats.freeze_frames) {
+        state.freezeFrames = state.stats.freeze_frames;
+      }
+      scheduleRender();
+    });
+    es.addEventListener('freeze_frame', function (e) {
+      const frame = JSON.parse(e.data);
+      state.freezeFrames.push({
+        id: frame.id,
+        reason: frame.reason,
+        source: frame.source,
+        timestamp: frame.timestamp,
+        t_mono: frame.t_mono,
+        pack_v: frame.pack ? frame.pack.sum_v : 0,
+        spread_mv: frame.pack ? frame.pack.spread_mv : 0,
+        min_cell: frame.pack ? frame.pack.min_cell : null,
+        max_cell: frame.pack ? frame.pack.max_cell : null,
+        hottest_temp: frame.temps ? frame.temps.hottest : null
+      });
       scheduleRender();
     });
     es.addEventListener('summary', function (e) { state.summary = JSON.parse(e.data); scheduleRender(); });
@@ -306,6 +339,8 @@
     /* The status bar keeps updating while paused, so a paused page doesn't
      * look like a dead one. */
     renderStatusBar();
+    renderAlarmPill();
+    renderLogging();
     renderBanner();
     /* A control, so it keeps updating while the charts are paused. */
     renderBalance();
@@ -551,6 +586,158 @@
       : 'off (start with --csv PATH to log to disk)');
   }
 
+  function renderAlarmPill() {
+    const pill = $('alarmPill');
+    const txt = $('alarmText');
+    if (!pill || !txt) return;
+
+    const st = state.stats || {};
+    const chain = st.chain || [];
+    const silent = chain.filter((c) => c.state === 'silent');
+    const pecErr = (st.pec_recent || 0) > 0;
+    const can = state.summary || {};
+    const faults = can.faults || [];
+    const polledFaults = (st.status_polled && st.status_fields)
+      ? Object.entries(st.status_fields).filter(([k, v]) => k !== 'ITMP' && Number(v) !== 0)
+      : [];
+
+    let alarm = false;
+    let label = 'Normal';
+
+    if (!state.connected) {
+      alarm = true;
+      label = 'Offline';
+    } else if (silent.length > 0) {
+      alarm = true;
+      label = silent.length === 1 ? 'IC' + silent[0].ic + ' Silent' : silent.length + ' ICs Silent';
+    } else if (faults.length > 0) {
+      alarm = true;
+      label = faults.length + ' Fault' + (faults.length > 1 ? 's' : '');
+    } else if (polledFaults.length > 0) {
+      alarm = true;
+      label = polledFaults[0][0] + ' Fault';
+    } else if (pecErr) {
+      alarm = true;
+      label = (st.pec_recent || 0) + ' PEC Errors';
+    }
+
+    pill.className = 'alarmpill ' + (alarm ? 'alarm' : 'normal');
+    setText(txt, label);
+
+    const btnFf = $('btnFreezeFrame');
+    if (btnFf) {
+      if (state.freezeFrames && state.freezeFrames.length > 0) {
+        btnFf.hidden = false;
+        setText(btnFf, 'Freeze-Frame (' + state.freezeFrames.length + ')');
+      } else {
+        btnFf.hidden = true;
+      }
+    }
+  }
+
+  function renderLogging() {
+    const btn = $('btnRecord');
+    const pill = $('logPill');
+    const badge = $('logBadge');
+    const timer = $('logTimer');
+    const framesEl = $('logFrames');
+    const btnDl = $('btnDownloadLog');
+    const busLogFile = $('telemetryLogFile');
+    const busLogRows = $('telemetryLogRows');
+
+    const log = state.logging || {};
+    const active = !!log.active;
+
+    if (btn) {
+      btn.className = 'btn-record' + (active ? ' recording' : '');
+      setText($('recordText'), active ? 'Stop Log' : 'Record');
+      btn.disabled = state.loggingBusy;
+    }
+
+    if (active) {
+      if (pill) pill.hidden = false;
+      if (badge) {
+        badge.className = 'logbadge';
+        setText(badge, 'REC');
+      }
+      if (timer) {
+        const dur = log.uptime_s || 0;
+        const m = Math.floor(dur / 60);
+        const s = Math.floor(dur % 60);
+        setText(timer, String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0'));
+      }
+      if (framesEl) {
+        setText(framesEl, (log.frames || 0).toLocaleString());
+      }
+      if (btnDl) {
+        btnDl.disabled = false;
+      }
+      if (busLogFile) setText(busLogFile, log.filename || 'active');
+      if (busLogRows) setText(busLogRows, (log.frames || 0).toLocaleString());
+    } else {
+      if (log.filename && (log.frames || 0) > 0) {
+        if (pill) pill.hidden = false;
+        if (badge) {
+          badge.className = 'logbadge saved';
+          setText(badge, 'SAVED');
+        }
+        if (timer) {
+          const sz = log.file_size_bytes || 0;
+          const szText = sz > 1048576
+            ? (sz / 1048576).toFixed(1) + ' MB'
+            : (sz > 1024 ? Math.round(sz / 1024) + ' KB' : sz + ' B');
+          setText(timer, szText);
+        }
+        if (framesEl) {
+          setText(framesEl, (log.frames || 0).toLocaleString());
+        }
+        if (btnDl) {
+          btnDl.disabled = false;
+        }
+        if (busLogFile) setText(busLogFile, log.filename);
+        if (busLogRows) setText(busLogRows, (log.frames || 0).toLocaleString());
+      } else {
+        if (pill) pill.hidden = true;
+        if (btnDl) btnDl.disabled = true;
+        if (busLogFile) setText(busLogFile, 'idle');
+        if (busLogRows) setText(busLogRows, '0');
+      }
+    }
+  }
+
+  function toggleLogging() {
+    if (state.loggingBusy) return;
+    const active = state.logging && state.logging.active;
+    state.loggingBusy = true;
+    scheduleRender();
+
+    const endpoint = active ? '/api/log/stop' : '/api/log/start';
+    fetch(endpoint, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((data) => {
+        state.logging = data;
+        pushConsole('[log] ' + (data.active
+          ? 'Started recording to ' + data.filename
+          : 'Stopped recording. Saved ' + data.frames + ' frames to ' + data.filename));
+      })
+      .catch((err) => {
+        pushConsole('[log error] ' + err.message, 'bad');
+      })
+      .finally(() => {
+        state.loggingBusy = false;
+        scheduleRender();
+      });
+  }
+
+  function downloadSessionLog() {
+    const a = document.createElement('a');
+    a.href = '/api/log/download';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   function renderBanner() {
     const st = state.stats || {};
     const src = st.source || {};
@@ -631,24 +818,23 @@
       setText($('kpiPack'), '--');
       const latest = latestPack();
       setText($('kpiPackSub'), latest
-        ? (latest.partial ? 'chain incomplete — IC' + latest.missing.join(', IC') + ' silent'
-                          : 'last cycle rejected (PEC error or warm-up)')
-        : 'waiting for a valid frame');
+        ? (latest.partial ? 'IC' + latest.missing.join(', ') + ' silent'
+                          : 'cycle rejected')
+        : '--');
       for (const id of ['kpiMin', 'kpiMax', 'kpiSpread']) setText($(id), '--');
       setText($('kpiMinSub'), '--'); setText($('kpiMaxSub'), '--');
     } else {
       setText($('kpiPack'), stats.sum.toFixed(2) + ' V');
-      setText($('kpiPackSub'), stats.cells.length + ' cells · mean '
-        + stats.mean.toFixed(4) + ' V');
+      setText($('kpiPackSub'), stats.cells.length + 's · avg ' + stats.mean.toFixed(3) + ' V');
       setText($('kpiMin'), stats.min.v.toFixed(4) + ' V');
       setText($('kpiMinSub'), 'IC' + stats.min.ic + ' C' + stats.min.cell + ' · '
-        + ((stats.min.v - stats.mean) * 1000).toFixed(1) + ' mV vs mean');
+        + ((stats.min.v - stats.mean) * 1000).toFixed(1) + ' mV');
       setText($('kpiMax'), stats.max.v.toFixed(4) + ' V');
       setText($('kpiMaxSub'), 'IC' + stats.max.ic + ' C' + stats.max.cell + ' · +'
-        + ((stats.max.v - stats.mean) * 1000).toFixed(1) + ' mV vs mean');
+        + ((stats.max.v - stats.mean) * 1000).toFixed(1) + ' mV');
       setText($('kpiSpread'), stats.spreadMv.toFixed(1) + ' mV');
       $('kpiSpread').className = 'value ' + spreadClass(stats.spreadMv);
-      setText($('kpiSpreadSub'), 'warn at ' + cfg().warn_spread_mv + ' mV');
+      setText($('kpiSpreadSub'), 'limit ' + cfg().warn_spread_mv + ' mV');
 
       const recent = visiblePacks().slice(-160).map(C.packStats).filter(Boolean);
       const t = C.theme();
@@ -658,21 +844,39 @@
     }
 
     setText($('kpiPec'), String(st.pec_recent || 0));
-    setText($('kpiPecSub'), 'in last ' + (st.pec_window || 0) + ' cycles · '
-      + (st.pec_total || 0) + ' total · ' + (st.partial_cycles || 0) + ' partial');
+    setText($('kpiPecSub'), (st.pec_recent || 0) + ' win · ' + (st.pec_total || 0) + ' tot');
 
     const chain = st.chain || [];
     const ok = chain.filter((c) => c.state === 'ok').length;
     setText($('kpiChain'), chain.length ? ok + ' / ' + chain.length : '--');
     $('kpiChain').className = 'value ' + (chain.length && ok === chain.length ? 'good' : 'critical');
     const badIcs = chain.filter((c) => c.state !== 'ok').map((c) => 'IC' + c.ic);
-    setText($('kpiChainSub'), badIcs.length ? 'problem: ' + badIcs.join(', ') : 'all ICs answering');
+    setText($('kpiChainSub'), badIcs.length ? badIcs.join(', ') + ' offline' : 'all online');
 
     renderIcStrip(chain);
+    renderThermalTopology();
     renderCharts();
     renderCellGrid(stats);
     renderTable(stats);
     renderFaults();
+    renderBusTelemetry();
+  }
+
+  function renderBusTelemetry() {
+    const st = state.stats || {};
+    const frames = $('telemetryFrames');
+    const partial = $('telemetryPartial');
+    const rateHint = $('busRateHint');
+    if (frames) {
+      const n = st.total_samples || 0;
+      setText(frames, n ? n.toLocaleString() : '--');
+    }
+    if (partial) {
+      setText(partial, String(st.partial_cycles || 0));
+    }
+    if (rateHint) {
+      setText(rateHint, fmt(st.rate_hz, 1) + ' Hz');
+    }
   }
 
   function renderIcStrip(chain) {
@@ -719,8 +923,7 @@
         + (c.die_temp_c === null || c.die_temp_c === undefined ? '' : '\nDie ' + c.die_temp_c.toFixed(1) + ' \u00b0C')
         + (bal.length ? '\nDischarging ' + bal.join(', ') : '');
     }
-    setText($('chainHint'), chain.length + ' IC(s) · ' + (cfg().cells_per_ic)
-      + ' populated cells each · grouped S1..Sn by segment board');
+    setText($('chainHint'), chain.length + ' ICs');
   }
 
   function viewSpec() {
@@ -736,7 +939,7 @@
       seriesMode: state.showContext ? 'all' : 'selected',
       selected: {},
       icsPerSegment: cfg().ics_per_segment,
-      cursorT: state.mode === 'replay' ? state.cursorT : null,
+      cursorT: state.mode === 'replay' ? state.cursorT : (state.followLive ? null : state.tsPanEnd),
       mode: state.mode,
       uv: cfg().uv, ov: cfg().ov,
       emptyMessage: state.connected ? 'Waiting for a valid frame'
@@ -1002,6 +1205,20 @@
 
         const frac = Math.min(1, Math.abs(dev) / refMv);
         const rgb = dev < 0 ? '57, 135, 229' : '217, 89, 38';
+
+        /* Baseline-offset gauge calculation */
+        let barPct = 0;
+        if (state.cellUnit === 'mv') {
+          barPct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+        } else {
+          const spreadSpan = stats.max.v - stats.min.v;
+          barPct = spreadSpan > 0.0005
+            ? Math.max(0, Math.min(100, Math.round(((v - stats.min.v) / spreadSpan) * 100)))
+            : 50;
+        }
+        btn.style.setProperty('--cg-bar', barPct + '%');
+        btn.style.setProperty('--cg-bar-color', 'rgb(' + rgb + ')');
+
         /* Dead band plus a curve, so only real outliers get much colour. */
         btn.style.background = frac < 0.18 ? 'transparent'
           : 'rgba(' + rgb + ', ' + (Math.pow(frac, 1.6) * 0.34).toFixed(3) + ')';
@@ -1035,26 +1252,13 @@
     const balText = discharge.cells.length
       ? '\u21af Discharging: ' + discharge.cells.map((d) => 'IC' + d.ic + ' C' + d.cell).join(', ') + '. '
       : '';
-    setText(legend, balText + (degraded
-        ? 'Live cycle is incomplete — values shown are from the last complete one '
-          + ((cursor() - usable.t).toFixed(1)) + ' s ago. '
-        : '')
-      + 'Colour = deviation from the ' + stats.mean.toFixed(4)
-      + ' V pack mean, full intensity at \u00b1' + refMv + ' mV. '
-      + 'Blue low, orange high. '
-      + (polled
-        ? (flagged.length ? 'Flagged: ' + flagged.slice(0, 6).join(', ')
-            + (flagged.length > 6 ? ' and ' + (flagged.length - 6) + ' more' : '')
-          : 'No UV/OV flags set.')
-        : chipFlagText()));
+    setText(legend, balText || (degraded ? 'Incomplete frame' : ''));
   }
 
   function chipFlagText() {
     const chips = chipFlagSummary();
-    if (!chips.known) return 'UV/OV not polled — add 15 to --poll to read the flags.';
-    return chips.items.length
-      ? 'Controller flags: ' + chips.items.join(', ') + ' (per chip; CAN does not say which cell).'
-      : 'Controller reports no UV/OV flags.';
+    if (!chips.known) return '';
+    return chips.items.length ? chips.items.join(', ') : 'OK';
   }
 
   function renderTable(stats) {
@@ -1062,14 +1266,12 @@
     const pack = latestUsablePack();
     if (!pack || !stats) {
       while (body.firstChild) body.removeChild(body.firstChild);
-      setText($('tableHint'), 'no valid cycle yet');
+      setText($('tableHint'), '');
       return;
     }
     const fields = (state.stats && state.stats.status_fields) || {};
     const polled = !!(state.stats && state.stats.status_polled);
-    setText($('tableHint'), (polled ? 'UV/OV from RDSTATD'
-        : (chipFlagSummary().known ? 'per-cell UV/OV not on CAN; ' + chipFlagText() : 'UV/OV not polled'))
-      + ' · ' + stats.cells.length + ' cells');
+    setText($('tableHint'), stats.cells.length + ' cells');
 
     const ranked = stats.cells.slice().sort((a, b) => a.v - b.v);
     const rankOf = {};
@@ -1127,11 +1329,7 @@
     const fields = st.status_fields || {};
     const can = state.summary;
 
-    setText($('faultHint'), can && can.faults
-      ? ('from CAN 0x602 · ' + (can.faults.length ? can.faults.join(', ') : 'no faults set'))
-      : (polled
-        ? 'from RDSTATA-E · die ' + (typeof fields.ITMP === 'number' ? fields.ITMP.toFixed(1) + ' °C' : '--')
-        : 'status not polled. Add 15 to --poll to enable it (see docs/serial.md)'));
+    setText($('faultHint'), can && can.faults && can.faults.length ? can.faults.join(', ') : (polled ? 'OK' : ''));
 
     if (grid.childElementCount !== FAULTS.length) {
       while (grid.firstChild) grid.removeChild(grid.firstChild);
@@ -1231,28 +1429,24 @@
       socTile.classList.remove('na');
       socTile.children[1].className = 'value';
       setText(socTile.children[1], can.soc_pct.toFixed(1) + ' %');
-      setText($('socSub'), 'reported by the controller over CAN 0x602');
+      setText($('socSub'), 'CAN 0x602');
     } else {
       socTile.classList.add('na');
       socTile.children[1].className = 'value na';
       setText(socTile.children[1], 'n/a');
-      setText($('socSub'), state.summary
-        ? 'the controller reports it is not estimating SOC'
-        : 'requires current integration on the controller');
+      setText($('socSub'), 'no estimate');
     }
     const balTile = $('kpiBalancing');
     if (typeof can.balancing_count === 'number' && can.balancing_count > 0) {
       balTile.classList.remove('na');
       balTile.children[1].className = 'value';
       setText(balTile.children[1], String(can.balancing_count));
-      setText($('balSub'), 'cells balancing, reported over CAN 0x602');
+      setText($('balSub'), 'CAN 0x602');
     } else {
       balTile.classList.add('na');
       balTile.children[1].className = 'value na';
       setText(balTile.children[1], 'n/a');
-      setText($('balSub'), state.summary
-        ? 'controller reports no cells balancing'
-        : 'firmware DCC is not enabled — nothing balances yet');
+      setText($('balSub'), 'inactive');
     }
 
     const t = C.theme();
@@ -1450,6 +1644,7 @@
         { points: pts.mean, colour: th.ink2, width: 1.5, label: 'mean' },
         { points: pts.lo, colour: th.s1, width: 2, label: 'min' }
       ],
+      hoverX: state.hoverTempX,
       windowS: 600, decimals: 1, minSpan: 2, fallback: [15, 45],
       emptyMessage: 'No thermistor readings yet'
     });
@@ -1473,6 +1668,170 @@
       setText(td[3], ok ? s.celsius.toFixed(1) : '--');
       td[2].className = ok ? '' : 'flag-bad';
     }
+
+    renderThermalTopology();
+  }
+
+  function currentThermalData() {
+    if (state.canTemps && state.canTemps.sensors && state.canTemps.sensors.length) {
+      const sensors = state.canTemps.sensors;
+      const valid = sensors.filter((s) => typeof s.celsius === "number");
+      return { sensors: sensors, valid: valid, polled: true, source: "can" };
+    }
+    const polled = !!(cfg().aux_polled) || state.aux.length > 0;
+    const byIc = latestAuxByIc();
+    const n = cfg().ntc;
+    const readings = [];
+    for (const ic of Object.keys(byIc).map(Number).sort((a, b) => a - b)) {
+      const a = byIc[ic];
+      a.channels.forEach((v, i) => {
+        const conv = ntcCelsius(v, n);
+        readings.push({ ic: ic, rt: i + 1, v: v, celsius: conv ? conv.c : null });
+      });
+    }
+    const valid = readings.filter((r) => typeof r.celsius === "number");
+    if (valid.length > 0) {
+      return { sensors: readings, valid: valid, polled: true, source: "aux" };
+    }
+    const ics = (state.stats && state.stats.source && state.stats.source.ics)
+      || (latestPack() && latestPack().expected_ics)
+      || cfg().ics || 2;
+    const placeholders = [];
+    for (let ic = 1; ic <= ics; ic++) {
+      for (let rt = 1; rt <= 4; rt++) {
+        placeholders.push({ ic: ic, rt: rt, celsius: null });
+      }
+    }
+    return { sensors: placeholders, valid: [], polled: polled, source: "unpolled" };
+  }
+
+  function renderThermalGridTo(gridId, badgeId, spreadHintId, data) {
+    const grid = $(gridId);
+    const badge = $(badgeId);
+    const spreadHint = $(spreadHintId);
+    if (!grid) return;
+
+    const sensors = data.sensors || [];
+    const valid = data.valid || [];
+    const isStandby = valid.length === 0;
+
+    let hot = null;
+    let cold = null;
+    if (!isStandby) {
+      hot = valid.reduce((a, b) => (b.celsius > a.celsius ? b : a));
+      cold = valid.reduce((a, b) => (b.celsius < a.celsius ? b : a));
+      const spread = hot.celsius - cold.celsius;
+      if (spreadHint) setText(spreadHint, "ΔT " + spread.toFixed(1) + " °C");
+    } else {
+      if (spreadHint) setText(spreadHint, "ΔT —");
+    }
+
+    let rate = 0;
+    let hasRate = false;
+    const hist = state.canTempHist;
+    if (!isStandby && hist && hist.length >= 2) {
+      const nowSample = hist[hist.length - 1];
+      const targetT = nowSample.t - 8.0;
+      let prevSample = hist[0];
+      for (let i = hist.length - 1; i >= 0; i--) {
+        if (hist[i].t <= targetT) { prevSample = hist[i]; break; }
+      }
+      const dt = nowSample.t - prevSample.t;
+      if (dt > 1.0) {
+        const nowVals = (nowSample.celsius || []).filter((c) => typeof c === "number");
+        const prevVals = (prevSample.celsius || []).filter((c) => typeof c === "number");
+        if (nowVals.length && prevVals.length) {
+          const nowMax = Math.max.apply(null, nowVals);
+          const prevMax = Math.max.apply(null, prevVals);
+          rate = (nowMax - prevMax) / dt;
+          hasRate = true;
+        }
+      }
+    }
+
+    if (badge) {
+      if (hasRate) {
+        setText(badge, "dT/dt: " + (rate >= 0 ? "+" : "") + rate.toFixed(2) + " °C/s");
+        badge.className = "rate-badge" + (rate > 0.05 ? " rising" : (rate < -0.05 ? " cooling" : ""));
+      } else {
+        setText(badge, "dT/dt: —");
+        badge.className = "rate-badge";
+      }
+    }
+
+    const per = cfg().ics_per_segment || 2;
+    const bySeg = {};
+    for (const s of sensors) {
+      const seg = Math.floor(((s.ic || 1) - 1) / per) + 1;
+      if (!bySeg[seg]) bySeg[seg] = [];
+      bySeg[seg].push(s);
+    }
+
+    const segKeys = Object.keys(bySeg).map(Number).sort((a, b) => a - b);
+    if (grid.childElementCount !== segKeys.length) {
+      while (grid.firstChild) grid.removeChild(grid.firstChild);
+      for (let k = 0; k < segKeys.length; k++) {
+        const mod = document.createElement("div");
+        mod.className = "thermal-module";
+        const head = document.createElement("div");
+        head.className = "thermal-module-head";
+        head.appendChild(document.createElement("span"));
+        head.appendChild(document.createElement("b"));
+        mod.appendChild(head);
+        const sWrap = document.createElement("div");
+        sWrap.className = "thermal-sensors";
+        mod.appendChild(sWrap);
+        grid.appendChild(mod);
+      }
+    }
+
+    for (let k = 0; k < segKeys.length; k++) {
+      const seg = segKeys[k];
+      const list = bySeg[seg];
+      const mod = grid.children[k];
+      const validInSeg = list.filter((s) => typeof s.celsius === "number");
+      const maxInSeg = validInSeg.length ? Math.max.apply(null, validInSeg.map((s) => s.celsius)) : null;
+
+      setText(mod.children[0].children[0], "Segment " + seg);
+      setText(mod.children[0].children[1], maxInSeg !== null ? maxInSeg.toFixed(1) + " °C" : (isStandby ? "Standby" : "—"));
+
+      const sWrap = mod.children[1];
+      if (sWrap.childElementCount !== list.length) {
+        while (sWrap.firstChild) sWrap.removeChild(sWrap.firstChild);
+        for (let j = 0; j < list.length; j++) {
+          const cell = document.createElement("div");
+          cell.className = "thermal-cell";
+          const n = document.createElement("span"); n.className = "th-name";
+          const v = document.createElement("span"); v.className = "th-val";
+          cell.appendChild(n); cell.appendChild(v);
+          sWrap.appendChild(cell);
+        }
+      }
+
+      for (let j = 0; j < list.length; j++) {
+        const s = list[j];
+        const cell = sWrap.children[j];
+        const hasVal = typeof s.celsius === "number";
+        setText(cell.children[0], (s.ic ? "IC" + s.ic + " " : "") + "RT" + s.rt);
+        setText(cell.children[1], hasVal ? s.celsius.toFixed(1) + "°" : "—");
+        cell.className = "thermal-cell"
+          + (isStandby ? " th-standby" : "")
+          + (hasVal && hot && s.celsius === hot.celsius ? " th-hot" : "")
+          + (hasVal && cold && s.celsius === cold.celsius ? " th-cold" : "");
+        if (hasVal) {
+          const frac = Math.max(0, Math.min(1, (s.celsius - 20) / 40));
+          cell.style.background = "rgba(" + (frac > 0.5 ? "220, 38, 38" : "59, 130, 246") + ", " + (0.05 + frac * 0.22).toFixed(2) + ")";
+        } else {
+          cell.style.background = "";
+        }
+      }
+    }
+  }
+
+  function renderThermalTopology() {
+    const data = currentThermalData();
+    renderThermalGridTo("thermalGridLive", "thermalRateBadgeLive", "thermalSpreadHintLive", data);
+    renderThermalGridTo("thermalGrid", "thermalRateBadge", "thermalSpreadHint", data);
   }
 
   function renderTemps() {
@@ -1495,21 +1854,16 @@
     }
     const valid = readings.filter((r) => r.c !== null);
 
-    setText($('tempHint'), polled
-      ? (valid.length + ' of ' + readings.length + ' AUX channels convert to a plausible '
-         + 'temperature · beta ' + n.beta + ', R25 ' + n.r25 + ' Ω, series ' + n.series
-         + ' Ω, VREF2 ' + n.vref + ' V')
-      : 'AUX not polled — start with --poll 11,12 to read the thermistor channels');
+    setText($('tempHint'), polled ? valid.length + ' / ' + readings.length + ' channels' : '');
 
     if (!valid.length) {
       for (const id of ['tHot', 'tCold', 'tMean', 'tCount']) setText($(id), '--');
-      setText($('tHotSub'), polled ? 'no channel converts to a plausible temperature'
-                                   : 'add 11,12 to --poll');
+      setText($('tHotSub'), '--');
       setText($('tColdSub'), '--');
       const tt = $('tempTableBody');
       while (tt.firstChild) tt.removeChild(tt.firstChild);
-      C.drawTrend($('tempCanvas'), { series: [], emptyMessage: polled
-        ? 'No valid thermistor readings' : 'AUX not polled (--poll 11,12)' });
+      C.drawTrend($('tempCanvas'), { series: [], emptyMessage: 'No data' });
+      renderThermalTopology();
       return;
     }
 
@@ -1521,7 +1875,7 @@
     setText($('tCold'), cold.c.toFixed(1) + ' °C');
     setText($('tColdSub'), 'IC' + cold.ic + ' AUX' + cold.ch);
     setText($('tMean'), mean.toFixed(1) + ' °C');
-    setText($('tMeanSub'), 'spread ' + (hot.c - cold.c).toFixed(1) + ' °C');
+    setText($('tMeanSub'), 'ΔT ' + (hot.c - cold.c).toFixed(1) + ' °C');
     setText($('tCount'), valid.length + ' / ' + readings.length);
 
     /* Trend shows min/mean/max only. Per-channel values are in the table. */
@@ -1567,6 +1921,8 @@
       setText(td[3], r.c === null ? 'no sensor' : r.c.toFixed(1));
       td[3].className = r.c === null ? 'flag-ok' : '';
     }
+    const auxSensors = valid.map((r) => ({ rt: r.ch, ic: r.ic, celsius: r.c }));
+    renderThermalTopology();
   }
 
   /* ------------------------------------------------------------ chain */
@@ -1727,6 +2083,8 @@
   function applyCellsView() {
     $('cellGrid').hidden = state.cellsView !== 'grid';
     $('cellGridLegend').hidden = state.cellsView !== 'grid';
+    const canvasWrap = $('cellCanvasWrap');
+    if (canvasWrap) canvasWrap.hidden = state.cellsView !== 'canvas';
     $('cellTableWrap').hidden = state.cellsView !== 'table';
     for (const b of document.querySelectorAll('[data-cellunit]')) {
       b.hidden = state.cellsView !== 'grid';
@@ -1748,6 +2106,122 @@
     }
   }
 
+  function openFreezeFrameModal(targetId) {
+    const modal = $('freezeFrameModal');
+    if (!modal) return;
+    const path = targetId ? ('/api/freeze-frame?id=' + encodeURIComponent(targetId)) : '/api/freeze-frame';
+    fetch(path, { cache: 'no-store' })
+      .then((r) => {
+        if (!r.ok) throw new Error('No freeze frame found');
+        return r.json();
+      })
+      .then((frame) => {
+        state.activeFreezeFrame = frame;
+        renderFreezeFrameDialog(frame);
+        if (typeof modal.showModal === 'function') {
+          if (!modal.open) modal.showModal();
+        } else {
+          modal.removeAttribute('hidden');
+        }
+      })
+      .catch((err) => {
+        console.warn('Could not load freeze-frame:', err);
+      });
+  }
+
+  function closeFreezeFrameModal() {
+    const modal = $('freezeFrameModal');
+    if (!modal) return;
+    if (typeof modal.close === 'function') modal.close();
+    else modal.setAttribute('hidden', '');
+  }
+
+  function renderFreezeFrameDialog(frame) {
+    if (!frame) return;
+    setText($('ffTitle'), frame.reason || 'Diagnostic Freeze-Frame');
+    setText($('ffBadge'), frame.id + ' · ' + (frame.source || 'FAULT').toUpperCase());
+
+    const sel = $('ffSelect');
+    if (sel) {
+      while (sel.firstChild) sel.removeChild(sel.firstChild);
+      const frames = state.freezeFrames || [];
+      for (const f of frames) {
+        const opt = document.createElement('option');
+        opt.value = f.id;
+        opt.textContent = f.id + ': ' + f.reason;
+        if (f.id === frame.id) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    }
+
+    const meta = $('ffMeta');
+    if (meta) {
+      while (meta.firstChild) meta.removeChild(meta.firstChild);
+      const items = [
+        ['Pack Sum', (frame.pack && typeof frame.pack.sum_v === 'number') ? frame.pack.sum_v.toFixed(3) + ' V' : '--'],
+        ['Spread (ΔV)', (frame.pack && typeof frame.pack.spread_mv === 'number') ? frame.pack.spread_mv.toFixed(1) + ' mV' : '--'],
+        ['Min Cell', frame.pack && frame.pack.min_cell ? 'IC' + frame.pack.min_cell.ic + ' C' + frame.pack.min_cell.cell + ' (' + frame.pack.min_cell.v.toFixed(4) + ' V)' : '--'],
+        ['Max Cell', frame.pack && frame.pack.max_cell ? 'IC' + frame.pack.max_cell.ic + ' C' + frame.pack.max_cell.cell + ' (' + frame.pack.max_cell.v.toFixed(4) + ' V)' : '--'],
+        ['Peak Temp', frame.temps && frame.temps.hottest ? frame.temps.hottest.celsius.toFixed(1) + ' °C' : '--'],
+        ['Timestamp', frame.timestamp ? frame.timestamp.replace('T', ' ').substring(0, 19) + ' UTC' : '--']
+      ];
+      for (const [lbl, val] of items) {
+        const div = document.createElement('div');
+        div.className = 'ff-meta-item';
+        const a = document.createElement('span'); a.className = 'label'; a.textContent = lbl;
+        const b = document.createElement('span'); b.className = 'val'; b.textContent = val;
+        div.appendChild(a); div.appendChild(b);
+        meta.appendChild(div);
+      }
+    }
+
+    const cellsGrid = $('ffCellsGrid');
+    if (cellsGrid) {
+      while (cellsGrid.firstChild) cellsGrid.removeChild(cellsGrid.firstChild);
+      const cells = (frame.pack && frame.pack.cells) || [];
+      const minKey = frame.pack && frame.pack.min_cell ? ('IC' + frame.pack.min_cell.ic + 'C' + frame.pack.min_cell.cell) : '';
+      const maxKey = frame.pack && frame.pack.max_cell ? ('IC' + frame.pack.max_cell.ic + 'C' + frame.pack.max_cell.cell) : '';
+      for (const c of cells) {
+        const key = 'IC' + c.ic + 'C' + c.cell;
+        const d = document.createElement('div');
+        d.className = 'ff-cell-tile' + (key === minKey ? ' min' : (key === maxKey ? ' max' : ''));
+        d.textContent = 'C' + c.cell + ': ' + c.v.toFixed(3);
+        d.title = 'IC' + c.ic + ' C' + c.cell + ' = ' + c.v.toFixed(4) + ' V';
+        cellsGrid.appendChild(d);
+      }
+    }
+
+    const tempsGrid = $('ffTempsGrid');
+    if (tempsGrid) {
+      while (tempsGrid.firstChild) tempsGrid.removeChild(tempsGrid.firstChild);
+      const sensors = (frame.temps && frame.temps.sensors) || [];
+      for (const s of sensors) {
+        const d = document.createElement('div');
+        d.className = 'ff-tile';
+        const a = document.createElement('span'); a.className = 't-title';
+        a.textContent = (s.channel ? 'CH' + s.channel : 'RT') + (s.ic ? ' IC' + s.ic : '');
+        const b = document.createElement('span'); b.className = 't-val';
+        b.textContent = (typeof s.celsius === 'number') ? s.celsius.toFixed(1) + ' °C' : '--';
+        d.appendChild(a); d.appendChild(b);
+        tempsGrid.appendChild(d);
+      }
+    }
+
+    const chainGrid = $('ffChainGrid');
+    if (chainGrid) {
+      while (chainGrid.firstChild) chainGrid.removeChild(chainGrid.firstChild);
+      const chain = frame.chain || [];
+      for (const c of chain) {
+        const d = document.createElement('div');
+        d.className = 'ff-tile';
+        const a = document.createElement('span'); a.className = 't-title'; a.textContent = 'IC' + c.ic;
+        const b = document.createElement('span'); b.className = 't-val'; b.textContent = (c.state || 'ok').toUpperCase();
+        d.appendChild(a); d.appendChild(b);
+        chainGrid.appendChild(d);
+      }
+    }
+  }
+
   function wire() {
     state.cellScale = pref('cellScale', 'pack') === 'band' ? 'band' : 'pack';
     state.windowS = numPref('window', 30);
@@ -1756,7 +2230,8 @@
     const savedFocus = pref('focusSegment', '');
     state.focusSegment = savedFocus === '' ? null : (Number(savedFocus) || null);
     state.tableSort = pref('sort', 'chain') === 'voltage' ? 'voltage' : 'chain';
-    state.cellsView = pref('cellsView', 'grid') === 'table' ? 'table' : 'grid';
+    const savedCellsView = pref('cellsView', 'grid');
+    state.cellsView = ['grid', 'canvas', 'table'].indexOf(savedCellsView) >= 0 ? savedCellsView : 'grid';
     state.cellUnit = pref('cellUnit', 'v') === 'mv' ? 'mv' : 'v';
     const startTab = params.get('tab') || pref('tab', 'live');
 
@@ -1766,12 +2241,41 @@
     selectTab(['live', 'charge', 'temps', 'chain', 'console'].indexOf(startTab) >= 0
       ? startTab : 'live');
 
+    function updateWindowButtons() {
+      for (const b of document.querySelectorAll('[data-window]')) {
+        const w = b.dataset.window;
+        if (w === 'all') {
+          const all = visiblePacks();
+          const span = all.length >= 2 ? all[all.length - 1].t - all[0].t : 0;
+          b.setAttribute('aria-pressed', String(span > 0 && Math.abs(state.windowS - span) < 1));
+        } else {
+          b.setAttribute('aria-pressed', String(Number(w) === Math.round(state.windowS)));
+        }
+      }
+    }
+
+    function updateLiveButton() {
+      const btn = $('btnFollowLive');
+      const txt = $('liveBtnText');
+      if (!btn) return;
+      if (state.followLive) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-pressed', 'true');
+        btn.title = 'Live edge locked. Drag or scroll to inspect past data.';
+        if (txt) setText(txt, 'Live');
+      } else {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-pressed', 'false');
+        btn.title = 'History paused. Click to jump to live edge.';
+        if (txt) setText(txt, 'Resume Live');
+      }
+    }
+
     for (const b of document.querySelectorAll('[data-cellscale]')) {
       b.setAttribute('aria-pressed', String(b.dataset.cellscale === state.cellScale));
     }
-    for (const b of document.querySelectorAll('[data-window]')) {
-      b.setAttribute('aria-pressed', String(Number(b.dataset.window) === state.windowS));
-    }
+    updateWindowButtons();
+    updateLiveButton();
     for (const b of document.querySelectorAll('[data-chgwindow]')) {
       b.setAttribute('aria-pressed', String(Number(b.dataset.chgwindow) === state.chgWindowS));
     }
@@ -1789,7 +2293,21 @@
     if (ctxBtn) ctxBtn.setAttribute('aria-pressed', String(state.showContext));
 
     toggleGroup('[data-cellscale]', 'cellscale', (v) => { state.cellScale = v; setPref('cellScale', v); });
-    toggleGroup('[data-window]', 'window', (v) => { state.windowS = Number(v); setPref('window', v); });
+    toggleGroup('[data-window]', 'window', (v) => {
+      if (v === 'all') {
+        const all = visiblePacks();
+        if (all.length >= 2) {
+          state.windowS = Math.max(10, Math.ceil(all[all.length - 1].t - all[0].t));
+        } else {
+          state.windowS = 600;
+        }
+      } else {
+        state.windowS = Number(v);
+        setPref('window', v);
+      }
+      updateWindowButtons();
+      scheduleRender();
+    });
     toggleGroup('[data-chgwindow]', 'chgwindow', (v) => { state.chgWindowS = Number(v); setPref('chgWindow', v); });
     toggleGroup('[data-sort]', 'sort', (v) => { state.tableSort = v; setPref('sort', v); });
     toggleGroup('[data-cellsview]', 'cellsview', (v) => {
@@ -1855,6 +2373,40 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && !panel.hidden) setPanel(false);
     });
+
+    /* --- session logging --- */
+    const recBtn = $('btnRecord');
+    if (recBtn) recBtn.addEventListener('click', toggleLogging);
+    const dlBtn = $('btnDownloadLog');
+    if (dlBtn) dlBtn.addEventListener('click', downloadSessionLog);
+
+    /* --- freeze-frame modal & alarms --- */
+    const btnFf = $('btnFreezeFrame');
+    if (btnFf) btnFf.addEventListener('click', function () { openFreezeFrameModal(); });
+    const alarmP = $('alarmPill');
+    if (alarmP) {
+      alarmP.addEventListener('click', function () {
+        if (state.freezeFrames && state.freezeFrames.length > 0) openFreezeFrameModal();
+      });
+    }
+    const btnFfClose = $('btnFfClose');
+    if (btnFfClose) btnFfClose.addEventListener('click', closeFreezeFrameModal);
+    const ffSel = $('ffSelect');
+    if (ffSel) {
+      ffSel.addEventListener('change', function () {
+        if (this.value) openFreezeFrameModal(this.value);
+      });
+    }
+
+    /* --- synchronized canvas hover crosshairs --- */
+    const tc = $('tempCanvas');
+    if (tc) {
+      tc.addEventListener('mousemove', function (e) {
+        state.hoverTempX = e.clientX - tc.getBoundingClientRect().left;
+        scheduleRender();
+      });
+      tc.addEventListener('mouseleave', function () { state.hoverTempX = null; scheduleRender(); });
+    }
 
     /* --- CSV export ---
      * Downloads the server's ring buffer in the same format as --csv, so
@@ -1922,11 +2474,188 @@
     });
 
     const ts = $('tsCanvas');
-    ts.addEventListener('mousemove', function (e) {
-      state.hoverX = e.clientX - ts.getBoundingClientRect().left;
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartEnd = 0;
+
+    ts.addEventListener('mousedown', function (e) {
+      if (e.button !== 0) return;
+      const all = visiblePacks();
+      if (!all.length) return;
+      isDragging = true;
+      dragStartX = e.clientX;
+      const latestT = all[all.length - 1].t;
+      dragStartEnd = (!state.followLive && state.tsPanEnd !== null) ? state.tsPanEnd : latestT;
+      ts.style.cursor = 'grabbing';
+      e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', function (e) {
+      if (isDragging) {
+        const plot = ts._plot;
+        if (!plot) return;
+        const all = visiblePacks();
+        if (!all.length) return;
+        const deltaX = e.clientX - dragStartX;
+        const pxPerSec = (plot.x1 - plot.x0) / plot.windowS;
+        if (pxPerSec <= 0) return;
+        const deltaT = deltaX / pxPerSec;
+        let newEnd = dragStartEnd - deltaT;
+        const minT = all[0].t + Math.min(plot.windowS, 1);
+        const maxT = all[all.length - 1].t;
+        newEnd = Math.max(minT, Math.min(maxT, newEnd));
+        state.tsPanEnd = newEnd;
+        if (newEnd >= maxT - 0.1) {
+          state.followLive = true;
+          state.tsPanEnd = null;
+        } else {
+          state.followLive = false;
+        }
+        updateLiveButton();
+        scheduleRender();
+      } else {
+        const rect = ts.getBoundingClientRect();
+        if (e.clientX >= rect.left && e.clientX <= rect.right &&
+            e.clientY >= rect.top && e.clientY <= rect.bottom) {
+          state.hoverX = e.clientX - rect.left;
+          scheduleRender();
+        }
+      }
+    });
+
+    window.addEventListener('mouseup', function () {
+      if (!isDragging) return;
+      isDragging = false;
+      ts.style.cursor = 'grab';
+    });
+
+    ts.addEventListener('mouseleave', function () {
+      if (!isDragging) {
+        state.hoverX = null;
+        scheduleRender();
+      }
+    });
+
+    ts.addEventListener('wheel', function (e) {
+      const plot = ts._plot;
+      if (!plot) return;
+      e.preventDefault();
+      const all = visiblePacks();
+      if (!all.length) return;
+      const latestT = all[all.length - 1].t;
+
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
+        // Horizontal scroll pan
+        const delta = e.shiftKey ? e.deltaY : e.deltaX;
+        const pxPerSec = (plot.x1 - plot.x0) / plot.windowS;
+        if (pxPerSec <= 0) return;
+        const deltaT = (delta / pxPerSec) * 0.7;
+        const currentEnd = (!state.followLive && state.tsPanEnd !== null) ? state.tsPanEnd : latestT;
+        let newEnd = currentEnd + deltaT;
+        const minT = all[0].t + Math.min(plot.windowS, 1);
+        const maxT = all[all.length - 1].t;
+        newEnd = Math.max(minT, Math.min(maxT, newEnd));
+        if (newEnd >= maxT - 0.1) {
+          state.followLive = true;
+          state.tsPanEnd = null;
+        } else {
+          state.followLive = false;
+          state.tsPanEnd = newEnd;
+        }
+        updateLiveButton();
+        scheduleRender();
+      } else {
+        // Zoom in/out centered at mouse pointer
+        const zoomFactor = Math.pow(1.002, e.deltaY);
+        const oldWindow = state.windowS;
+        let newWindow = Math.max(2, Math.min(3600, oldWindow * zoomFactor));
+        const rect = ts.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const ratio = Math.max(0, Math.min(1, (mouseX - plot.x0) / (plot.x1 - plot.x0)));
+        const currentEnd = (!state.followLive && state.tsPanEnd !== null) ? state.tsPanEnd : latestT;
+        const tUnderCursor = currentEnd - (1 - ratio) * oldWindow;
+        let newEnd = tUnderCursor + (1 - ratio) * newWindow;
+        const maxT = all[all.length - 1].t;
+        if (newEnd > maxT) newEnd = maxT;
+        state.windowS = Math.round(newWindow * 10) / 10;
+        if (!state.followLive) {
+          state.tsPanEnd = newEnd;
+        }
+        updateWindowButtons();
+        scheduleRender();
+      }
+    }, { passive: false });
+
+    ts.addEventListener('dblclick', function () {
+      state.followLive = true;
+      state.tsPanEnd = null;
+      state.windowS = 30;
+      updateLiveButton();
+      updateWindowButtons();
       scheduleRender();
     });
-    ts.addEventListener('mouseleave', function () { state.hoverX = null; scheduleRender(); });
+
+    if ($('btnFollowLive')) {
+      $('btnFollowLive').addEventListener('click', function () {
+        state.followLive = true;
+        state.tsPanEnd = null;
+        updateLiveButton();
+        scheduleRender();
+      });
+    }
+
+    if ($('btnZoomIn')) {
+      $('btnZoomIn').addEventListener('click', function () {
+        state.windowS = Math.max(2, Math.round((state.windowS / 1.5) * 10) / 10);
+        updateWindowButtons();
+        scheduleRender();
+      });
+    }
+
+    if ($('btnZoomOut')) {
+      $('btnZoomOut').addEventListener('click', function () {
+        state.windowS = Math.min(3600, Math.round((state.windowS * 1.5) * 10) / 10);
+        updateWindowButtons();
+        scheduleRender();
+      });
+    }
+
+    if ($('btnZoomFit')) {
+      $('btnZoomFit').addEventListener('click', function () {
+        state.windowS = 30;
+        state.followLive = true;
+        state.tsPanEnd = null;
+        updateLiveButton();
+        updateWindowButtons();
+        scheduleRender();
+      });
+    }
+
+    function toggleTsMaximize(force) {
+      const panel = $('timeseriesPanel');
+      const btn = $('btnTsMaximize');
+      const isMax = force !== undefined ? force : !state.isTsMaximized;
+      state.isTsMaximized = isMax;
+      if (panel) panel.classList.toggle('panel-maximized', isMax);
+      document.body.classList.toggle('has-maximized-panel', isMax);
+      if (btn) {
+        btn.setAttribute('aria-pressed', String(isMax));
+        setText(btn, isMax ? 'Restore' : 'Full Size');
+      }
+      scheduleRender();
+    }
+
+    if ($('btnTsMaximize')) {
+      $('btnTsMaximize').addEventListener('click', function () {
+        toggleTsMaximize();
+      });
+    }
+
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && state.isTsMaximized) {
+        toggleTsMaximize(false);
+      }
+    });
 
     /* Drill-down buttons. Delegated since the bar gets rebuilt when the
      * chain shape changes. */

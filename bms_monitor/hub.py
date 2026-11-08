@@ -13,8 +13,10 @@ import time
 from collections import deque
 from typing import Optional
 
+from .freeze_frame import FreezeFrameManager
 from .model import CELL_COUNT, PackSample
 from .ringbuffer import RingBuffer
+from .session_logger import SessionLogger
 
 #: Max concurrent SSE clients.
 MAX_SSE_CLIENTS = 8
@@ -74,6 +76,8 @@ class Hub:
         self.can_temps_history = RingBuffer(temp_history)
         self._csv = csv_logger
         self._temp_csv = temp_csv_logger
+        self._session_logger = SessionLogger()
+        self._freeze_frame_mgr = FreezeFrameManager()
         # Display-only config sent to the browser on page load. Never sent
         # to the BMS.
         self._ui_config = dict(ui_config or {})
@@ -117,12 +121,15 @@ class Hub:
         try:
             if kind == "sample":
                 self._on_sample(payload)
+            elif kind == "can_frame":
+                self._session_logger.log_can_frame(payload)
             elif kind == "line":
                 self.raw_lines.append(payload)
                 self._broadcast("line", {"text": payload})
             elif kind == "aux":
                 self._on_aux(payload)
             elif kind == "temps":
+                self._session_logger.log_temps(payload)
                 # Already in Celsius from the controller over CAN, so stored
                 # as-is with no NTC conversion.
                 with self._lock:
@@ -144,6 +151,10 @@ class Hub:
                 # as-is.
                 with self._lock:
                     self._summary = dict(payload)
+                faults = payload.get("faults")
+                if faults:
+                    names = ", ".join(str(f) for f in faults)
+                    self.capture_freeze_frame(f"CAN_FAULT: {names}", source="can")
                 self._broadcast("summary", payload)
             elif kind == "status":
                 with self._lock:
@@ -153,6 +164,9 @@ class Hub:
             elif kind == "event":
                 item = {"kind": payload.kind, "text": payload.text}
                 self.events.append(item)
+                self._session_logger.log_event(payload.kind, payload.text)
+                if payload.kind in ("firmware_error", "parser_error"):
+                    self.capture_freeze_frame(f"SYSTEM_ERROR: {payload.kind} - {payload.text}", source="event")
                 if payload.kind in ("incomplete", "unparsed", "registers_cleared",
                                     "firmware_error", "parser_error"):
                     self._broadcast("event", item)
@@ -181,6 +195,26 @@ class Hub:
             if pack.usable:
                 self._last_usable_t = now
         self.samples.append(pack)
+        self._session_logger.log_sample(pack)
+        if pack.usable and self._ui_config:
+            uv = self._ui_config.get("uv")
+            ov = self._ui_config.get("ov")
+            cpi = pack.cells_per_ic
+            breached = False
+            for r in pack.readings:
+                cells_to_check = r.cells[:cpi] if (cpi and cpi > 0) else r.cells
+                for idx, v in enumerate(cells_to_check):
+                    if v is not None:
+                        if uv is not None and v < uv:
+                            self.capture_freeze_frame(f"UNDER_VOLTAGE: IC{r.ic} C{idx + 1} ({v:.4f}V < {uv}V)", source="threshold")
+                            breached = True
+                            break
+                        if ov is not None and v > ov:
+                            self.capture_freeze_frame(f"OVER_VOLTAGE: IC{r.ic} C{idx + 1} ({v:.4f}V > {ov}V)", source="threshold")
+                            breached = True
+                            break
+                if breached:
+                    break
         if self._csv is not None:
             try:
                 self._csv.write(pack)
@@ -370,9 +404,11 @@ class Hub:
             "csv_rows": self._csv.rows if self._csv else 0,
             "temps_csv_path": self._temp_csv.path if self._temp_csv else None,
             "temps_csv_rows": self._temp_csv.rows if self._temp_csv else 0,
+            "freeze_frames": self._freeze_frame_mgr.list_frames(),
         }
         if latest is not None:
             out["latest"] = latest.to_json()
+        out["logging"] = self._session_logger.status()
         return out
 
     def snapshot(self, history: int = 1200, aux_history: int = 600,
@@ -394,6 +430,9 @@ class Hub:
             "raw_lines": self.raw_lines.snapshot(limit=300),
             "events": self.events.snapshot(limit=100),
             "stats": stats_val,
+            "logging": self._session_logger.status(),
+            "freeze_frames": self._freeze_frame_mgr.list_frames(),
+            "latest_freeze_frame": self._freeze_frame_mgr.latest_frame(),
         }
 
     def reset(self) -> None:
@@ -404,6 +443,7 @@ class Hub:
             self.events.reset()
             self.aux.reset()
             self.can_temps_history.reset()
+            self._freeze_frame_mgr.clear()
             self._latest = None
             self._latest_aux.clear()
             self._summary.clear()
@@ -427,3 +467,50 @@ class Hub:
         replayable CSV. Returns ``""`` when nothing has been recorded."""
         from .logging_csv import render_csv
         return render_csv(self.samples.snapshot())
+
+    def start_logging(self, name_prefix: str = "bms_can_log") -> dict:
+        status = self._session_logger.start(name_prefix)
+        self._broadcast("logging", status)
+        return status
+
+    def stop_logging(self) -> dict:
+        status = self._session_logger.stop()
+        self._broadcast("logging", status)
+        return status
+
+    def logging_status(self) -> dict:
+        return self._session_logger.status()
+
+    def get_latest_log_path(self) -> Optional[str]:
+        return self._session_logger.get_latest_log_path()
+
+    def capture_freeze_frame(self, reason: str, source: str = "fault",
+                             extra: Optional[dict] = None) -> Optional[dict]:
+        with self._lock:
+            latest = self._latest
+            summary = dict(self._summary)
+            temps = dict(self._can_temps)
+            status_fields = dict(self._status_fields)
+        chain = self.chain_state()
+        frame = self._freeze_frame_mgr.capture(
+            reason=reason,
+            source=source,
+            pack=latest,
+            summary=summary,
+            temps=temps,
+            chain=chain,
+            status_fields=status_fields,
+            extra=extra,
+        )
+        if frame is not None:
+            self._broadcast("freeze_frame", frame)
+        return frame
+
+    def freeze_frames(self) -> list:
+        return self._freeze_frame_mgr.list_frames()
+
+    def get_freeze_frame(self, frame_id: str) -> Optional[dict]:
+        return self._freeze_frame_mgr.get_frame(frame_id)
+
+    def latest_freeze_frame(self) -> Optional[dict]:
+        return self._freeze_frame_mgr.latest_frame()

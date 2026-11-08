@@ -291,6 +291,8 @@ class CanSource(TelemetrySource):
             try:
                 message = bus.recv(timeout=recv_timeout)
             except Exception as exc:
+                if self._stop_event.is_set():
+                    return
                 self._set_link(LINK_RECONNECTING, error="CAN read failed: %s" % exc)
                 return
             now = time.monotonic()
@@ -302,13 +304,18 @@ class CanSource(TelemetrySource):
                     return
                 continue
 
-            self._last_frame_t = now
-            if not getattr(message, "is_error_frame", False):
-                self._clear_error()
             if getattr(message, "is_error_frame", False):
                 with self._lock:
                     self._frames["bad"] += 1
+                if (now - self._last_frame_t) > STALL_TIMEOUT_S:
+                    self._set_link(
+                        LINK_RECONNECTING,
+                        error="no valid CAN frames for %.0fs (error storm) -- cycling the bus" % STALL_TIMEOUT_S)
+                    return
                 continue
+
+            self._last_frame_t = now
+            self._clear_error()
             self._handle(message)
 
     def _expected_cell_frames(self) -> int:
@@ -384,6 +391,10 @@ class CanSource(TelemetrySource):
         with self._lock:
             if self._chain_mode:
                 if frame in self._cells:
+                    prev_val, prev_stamp = self._cells[frame]
+                    if (now - prev_stamp) < 0.05:
+                        self._cells[frame] = (list(decoded["volts"]), now)
+                        return
                     # A 0x6FF went missing: this frame opens the next cycle.
                     # Everything already held is the previous cycle.
                     closing, closing_status = self._cells, self._round_status
@@ -485,6 +496,8 @@ class CanSource(TelemetrySource):
                     self._note_dropout(ic, self._dropout_reason(ic, cells))
                 continue
             readings.append(self._reading(ic, volts, diag, pec_ok=True, now=now))
+            if hasattr(self, "_last_dropout_reason") and ic in self._last_dropout_reason:
+                self._last_dropout_reason.pop(ic, None)
 
         if not readings:
             return
@@ -520,6 +533,12 @@ class CanSource(TelemetrySource):
     def _note_dropout(self, ic: int, reason: str) -> None:
         """Raw-console line for an IC left out of a round, with the time, so
         dropouts can be lined up against anything else on the bus."""
+        with self._lock:
+            if not hasattr(self, "_last_dropout_reason"):
+                self._last_dropout_reason = {}
+            if self._last_dropout_reason.get(ic) == reason:
+                return
+            self._last_dropout_reason[ic] = reason
         self._emit("line", "can: %s IC%d left out of this cycle: %s" % (_stamp(), ic, reason))
 
     def _reading(self, ic, volts, diag, pec_ok, now):

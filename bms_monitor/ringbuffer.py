@@ -45,10 +45,13 @@ class RingBuffer:
     def snapshot(self, limit: int = None) -> List:
         """Most recent ``limit`` items, oldest first."""
         with self._lock:
-            items = [item for _, item in self._items]
-        if limit is not None and limit < len(items):
-            return items[-limit:]
-        return items
+            n = len(self._items)
+            if limit is not None:
+                if limit <= 0:
+                    return []
+                if limit < n:
+                    return [self._items[i][1] for i in range(n - limit, n)]
+            return [item for _, item in self._items]
 
     def since(self, seq: int) -> List:
         """Items with a sequence number strictly greater than ``seq``."""
@@ -69,6 +72,12 @@ class RingBuffer:
     def clear(self) -> None:
         with self._lock:
             self._items.clear()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._next_seq = 0
+            self._dropped = 0
 
     def __len__(self) -> int:
         with self._lock:

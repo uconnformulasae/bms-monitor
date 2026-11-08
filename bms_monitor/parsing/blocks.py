@@ -56,6 +56,7 @@ PASSTHROUGH_HEADERS = {
 
 _CCOUNT_IN_LINE = re.compile(r"\bCCount:\s*-?\d+")
 _MARKER = re.compile(r"^#{3,}")
+MAX_BLOCK_TOKENS = 64
 
 
 class BlockAssembler:
@@ -120,7 +121,7 @@ class BlockAssembler:
 
         if self.in_measurement_block:
             self._tokens.extend(self._split(stripped))
-            if _CCOUNT_IN_LINE.search(stripped):
+            if _CCOUNT_IN_LINE.search(stripped) or len(self._tokens) >= MAX_BLOCK_TOKENS:
                 return self._flush()
             return []
 

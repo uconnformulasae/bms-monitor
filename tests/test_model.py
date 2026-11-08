@@ -113,10 +113,6 @@ class TestDisconnectDetection(unittest.TestCase):
         self.assertFalse(M.looks_disconnected([1.499700] * 16))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestNtcConversion(unittest.TestCase):
     """Thermistor maths.
 
@@ -243,3 +239,7 @@ class TestPackSample(unittest.TestCase):
         self.assertFalse(p.pec_ok)
         self.assertIsNone(p.pack_v)
         self.assertEqual(p.cell_count, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

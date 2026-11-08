@@ -12,6 +12,7 @@ the polling path stays read-only. Commands 17-20 are blocked here too.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from typing import List, Optional
@@ -151,6 +152,9 @@ def format_decode(records, cells_per_ic: int = 0) -> List[str]:
                     break
                 if volts is None:
                     out.append("        c%-3d  (did not parse)" % (index + 1))
+                    continue
+                if not math.isfinite(volts):
+                    out.append("        c%-3d  (non-finite voltage)" % (index + 1))
                     continue
                 code = int(round(volts / 0.000150)) - 10000
                 warn = "" if is_plausible_voltage(volts) else "   <-- IMPLAUSIBLE"

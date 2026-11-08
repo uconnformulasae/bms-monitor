@@ -105,6 +105,7 @@ class IngestPipeline:
         # Open poll cycle.
         self._cycle = {}                # ic -> Sample
         self._cycle_opened_at = 0.0
+        self._terminator_signaled = False
 
         # Counters shown in the UI. They only go up.
         self.lines_seen = 0
@@ -141,6 +142,7 @@ class IngestPipeline:
         self._ack_times.clear()
         self._cycle = {}
         self._cycle_opened_at = 0.0
+        self._terminator_signaled = False
         self.stuck_suspected = False
 
     def tick(self) -> None:
@@ -201,7 +203,8 @@ class IngestPipeline:
                 # A blank line ends one IC's record. If a cycle is still
                 # open, the other ICs are still printing, so don't let the
                 # pacer send the next command yet.
-                if not self._cycle:
+                if not self._cycle and not self._terminator_signaled:
+                    self._terminator_signaled = True
                     self._on_terminator()
                 return
             self._on_event(record)
@@ -315,7 +318,9 @@ class IngestPipeline:
         self.ccount_jumps += sum(1 for r in readings if r.ccount_jump)
 
         self._on_pack(pack)
-        self._on_terminator()
+        if not self._terminator_signaled:
+            self._terminator_signaled = True
+            self._on_terminator()
 
     # -- aux ---------------------------------------------------------------
 

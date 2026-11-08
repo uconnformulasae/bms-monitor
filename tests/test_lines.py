@@ -41,9 +41,15 @@ class TestLineAssembler(unittest.TestCase):
         stream = (b"IC1:C1=3.712000V,C2=3.708000V,CCount:63,PECError:0\n\n"
                   b"Enter cmd:4\r\n"
                   b"Status A:\nVREF2:3.000000V\r")
-        whole = texts(LineAssembler().feed(stream)) + texts(LineAssembler().feed(stream)[:0])
+        expected = [
+            "IC1:C1=3.712000V,C2=3.708000V,CCount:63,PECError:0",
+            "",
+            "Enter cmd:4",
+            "Status A:",
+            "VREF2:3.000000V",
+        ]
         reference = texts(LineAssembler().feed(stream))
-        self.assertEqual(whole[:len(reference)], reference)
+        self.assertEqual(reference, expected)
 
         for cut in range(len(stream) + 1):
             a = LineAssembler()

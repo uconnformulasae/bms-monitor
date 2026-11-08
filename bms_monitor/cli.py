@@ -255,6 +255,27 @@ def main(argv=None) -> int:
         print("run with --list-commands to see what is allowed", file=sys.stderr)
         return 2
 
+    if args.source == "replay" and not args.file:
+        print("error: --source replay requires --file PATH", file=sys.stderr)
+        return 2
+    if not (0 <= args.http_port <= 65535):
+        print("error: --http-port must be between 0 and 65535", file=sys.stderr)
+        return 2
+    if args.ics < 1 or args.ics > 16:
+        print("error: --ics must be between 1 and 16", file=sys.stderr)
+        return 2
+    if args.cells_per_ic < 1 or args.cells_per_ic > model.CELL_COUNT:
+        print("error: --cells-per-ic must be between 1 and %d" % model.CELL_COUNT,
+              file=sys.stderr)
+        return 2
+    if args.ics_per_segment < 1 or args.ics_per_segment > 16:
+        print("error: --ics-per-segment must be between 1 and 16",
+              file=sys.stderr)
+        return 2
+    if args.allow_tx and args.source != "can":
+        print("error: --allow-tx only works with --source can", file=sys.stderr)
+        return 2
+
     csv_logger = None
     temp_csv_logger = None
     if args.csv:
@@ -263,29 +284,13 @@ def main(argv=None) -> int:
         except OSError as exc:
             print("error: cannot open CSV %s: %s" % (args.csv, exc), file=sys.stderr)
             return 2
-        # Thermistor readings from the controller over CAN. The file is only
-        # created once a temperature arrives.
         temp_csv_logger = TempCsvLogger(temps_path_for(args.csv))
 
-    if args.ics < 1 or args.ics > 16:
-        print("error: --ics must be between 1 and 16", file=sys.stderr)
-        return 2
-    if args.cells_per_ic < 1 or args.cells_per_ic > model.CELL_COUNT:
-        print("error: --cells-per-ic must be between 1 and %d" % model.CELL_COUNT,
-              file=sys.stderr)
-        return 2
-    # Allowed to be larger than --ics: a bench setup is often one chip of a
-    # two-chip board, and the display just shows a single board.
-    if args.ics_per_segment < 1 or args.ics_per_segment > 16:
-        print("error: --ics-per-segment must be between 1 and 16",
-              file=sys.stderr)
-        return 2
-
-    if args.allow_tx and args.source != "can":
-        print("error: --allow-tx only works with --source can", file=sys.stderr)
+    def _close_loggers():
         if csv_logger:
             csv_logger.close()
-        return 2
+        if temp_csv_logger:
+            temp_csv_logger.close()
     tx_control = None
     if args.allow_tx:
         from .sources.can_command_gate import BalanceTestControl
@@ -298,8 +303,7 @@ def main(argv=None) -> int:
         source = _build_source(args, poll_plan, tx_control)
     except Exception as exc:
         print("error: %s" % exc, file=sys.stderr)
-        if csv_logger:
-            csv_logger.close()
+        _close_loggers()
         return 2
 
     hub.attach(source)
@@ -311,8 +315,7 @@ def main(argv=None) -> int:
         print("error: cannot bind 127.0.0.1:%d (%s)" % (args.http_port, exc), file=sys.stderr)
         print("       another copy may already be running; try --http-port 8766",
               file=sys.stderr)
-        if csv_logger:
-            csv_logger.close()
+        _close_loggers()
         return 2
 
     stopping = threading.Event()
@@ -333,8 +336,7 @@ def main(argv=None) -> int:
         # No pyserial, no CAN backend, no port: print why and exit.
         print("error: %s" % exc, file=sys.stderr)
         server.stop()
-        if csv_logger:
-            csv_logger.close()
+        _close_loggers()
         return 2
 
     print("bms-monitor")

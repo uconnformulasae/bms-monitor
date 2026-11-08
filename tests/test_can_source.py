@@ -5,6 +5,7 @@ faked, so bit timing, arbitration, error frames and adapter drivers aren't
 covered. Skipped when python-can isn't installed.
 """
 
+import threading
 import time
 import unittest
 
@@ -73,8 +74,19 @@ class TestCanRobustness(unittest.TestCase):
             source.stop()
 
     def test_bus_that_goes_quiet_moves_to_reconnecting(self):
-        from bms_monitor.sources.can_source import STALL_TIMEOUT_S
-        self.assertGreater(STALL_TIMEOUT_S, 5)   # documented watchdog exists
+        import can
+        from bms_monitor.sources.can_source import CanSource, STALL_TIMEOUT_S
+        source = CanSource(channel="test_watchdog", interface="virtual", total_ic=1, cells_per_ic=4)
+        bus = can.Bus(channel="test_watchdog", interface="virtual")
+        try:
+            source.start()
+            self.assertTrue(wait_for(lambda: source.status()["link"] == "up"))
+            source._last_frame_t = time.monotonic() - STALL_TIMEOUT_S - 1.0
+            self.assertTrue(wait_for(lambda: source.status()["link"] == "reconnecting", timeout=2.0))
+            self.assertIn("cycling the bus", source.status()["last_error"])
+        finally:
+            source.stop()
+            bus.shutdown()
 
     def test_source_exposes_no_transmit_path(self):
         from bms_monitor.sources.can_source import CanSource
@@ -93,6 +105,96 @@ class TestCanRobustness(unittest.TestCase):
         self.assertEqual(sends, ["bus.send(message, timeout=0.2)"])
         self.assertIn("for can_id, data in self._tx.take():", src)
         self.assertNotIn("can.Message(", src.replace("can_module.Message(", ""))
+
+
+@unittest.skipUnless(HAVE_CAN, SKIP)
+class TestCanSourceInternals(unittest.TestCase):
+    def test_start_when_already_started_is_noop(self):
+        from bms_monitor.sources.can_source import CanSource
+        src = CanSource(channel="vcan_internals", interface="virtual")
+        src._thread = threading.Thread(target=lambda: None)
+        src.start()
+        self.assertIsNotNone(src._thread)
+
+    def test_close_bus_ignores_exception(self):
+        from bms_monitor.sources.can_source import CanSource
+        src = CanSource(channel="vcan_internals", interface="virtual")
+        class BadBus:
+            def shutdown(self):
+                raise RuntimeError("shutdown fail")
+        src._bus = BadBus()
+        src._close_bus()
+        self.assertIsNone(src._bus)
+
+    def test_error_frame_increments_bad_counter(self):
+        from bms_monitor.sources.can_source import CanSource
+        src = CanSource(channel="vcan_internals", interface="virtual")
+        class ErrorMsg:
+            is_error_frame = True
+        class BusMock:
+            def __init__(self):
+                self.count = 0
+            def recv(self, timeout=None):
+                if self.count == 0:
+                    self.count += 1
+                    return ErrorMsg()
+                return None
+        src._bus = BusMock()
+        src._last_frame_t = time.monotonic()
+        threading.Timer(0.05, src._stop_event.set).start()
+        src._session(can)
+        self.assertEqual(src._frames["bad"], 1)
+
+    def test_send_queued_failure_sets_reconnecting(self):
+        from bms_monitor.sources.can_source import CanSource
+        from bms_monitor.sources.can_command_gate import BalanceTestControl
+        tx = BalanceTestControl()
+        tx.request(True)
+        src = CanSource(channel="vcan_internals", interface="virtual", tx_control=tx)
+        class FailingSendBus:
+            def send(self, msg, timeout=None):
+                raise RuntimeError("bus full")
+            def recv(self, timeout=None):
+                return None
+        src._bus = FailingSendBus()
+        src._last_frame_t = time.monotonic() - 10.0
+        src._session(can)
+        status = src.status()
+        self.assertEqual(status["link"], "reconnecting")
+        self.assertIn("CAN send failed", status["last_error"])
+
+    def test_recv_failure_sets_reconnecting(self):
+        from bms_monitor.sources.can_source import CanSource
+        src = CanSource(channel="vcan_internals", interface="virtual")
+        class FailingRecvBus:
+            def recv(self, timeout=None):
+                raise RuntimeError("recv error")
+        src._bus = FailingRecvBus()
+        src._session(can)
+        status = src.status()
+        self.assertEqual(status["link"], "reconnecting")
+        self.assertIn("CAN read failed", status["last_error"])
+
+    def test_dropout_reason_descriptions(self):
+        from bms_monitor.sources.can_source import CanSource
+        src = CanSource(channel="vcan_internals", interface="virtual", total_ic=2, cells_per_ic=9)
+        reason = src._dropout_reason(1, cells={})
+        self.assertIn("cell frame(s)", reason)
+        self.assertIn("never arrived", reason)
+        reason_all = src._dropout_reason(1, cells={0: None, 1: None, 2: None})
+        self.assertIn("0xFFFF", reason_all)
+
+    def test_balance_cmd_frame_emits_line(self):
+        from bms_monitor.sources.can_source import CanSource
+        src = CanSource(channel="vcan_internals", interface="virtual")
+        lines = []
+        src.subscribe(lambda kind, payload: lines.append(payload) if kind == "line" else None)
+        can_id, data = F.encode_balance_cmd(True)
+        class Msg:
+            arbitration_id = can_id
+        Msg.data = data
+        src._handle(Msg())
+        self.assertTrue(any("another node sent balance test" in l for l in lines))
 
 
 if __name__ == "__main__":

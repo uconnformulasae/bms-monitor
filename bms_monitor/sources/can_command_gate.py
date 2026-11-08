@@ -101,6 +101,8 @@ class BalanceTestControl:
         with self._lock:
             self._expired += len(self._queue)
             self._queue.clear()
+            self._requested = None
+            self._requested_at = None
 
     def note_sent(self) -> None:
         with self._lock:

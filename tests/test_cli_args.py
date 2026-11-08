@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -72,6 +73,109 @@ class TestValidation(unittest.TestCase):
 
     def test_transmit_is_off_by_default(self):
         self.assertFalse(parse("--source", "can").allow_tx)
+
+    def test_list_commands_flag(self):
+        self.assertEqual(self.run_cli("--list-commands"), 0)
+
+    def test_can_channels_flag(self):
+        self.assertEqual(self.run_cli("--can-channels"), 0)
+
+    def test_invalid_ranges_rejected(self):
+        self.assertEqual(self.run_cli("--ics", "0"), 2)
+        self.assertEqual(self.run_cli("--ics", "17"), 2)
+        self.assertEqual(self.run_cli("--cells-per-ic", "0"), 2)
+        self.assertEqual(self.run_cli("--cells-per-ic", "17"), 2)
+        self.assertEqual(self.run_cli("--ics-per-segment", "0"), 2)
+        self.assertEqual(self.run_cli("--http-port", "70000"), 2)
+
+    def test_replay_without_file_rejected(self):
+        self.assertEqual(cli.main(["--source", "replay", "--no-browser"]), 2)
+
+    def test_main_module_execution(self):
+        import runpy
+        import subprocess
+        res = subprocess.run([sys.executable, "-m", "bms_monitor", "--list-commands"],
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Allowed (read / measure only):", res.stdout)
+
+        from unittest import mock
+        with mock.patch("sys.argv", ["bms_monitor", "--list-commands"]):
+            with self.assertRaises(SystemExit) as cm:
+                runpy.run_module("bms_monitor", run_name="__main__")
+            self.assertEqual(cm.exception.code, 0)
+
+    def test_can_source_execution(self):
+        ret = cli.main(["--source", "can", "--can-interface", "virtual",
+                        "--can-channel", "vcan_cli_test", "--duration", "0.2",
+                        "--no-browser", "--http-port", "0"])
+        self.assertEqual(ret, 0)
+
+    def test_can_source_with_allow_tx(self):
+        ret = cli.main(["--source", "can", "--allow-tx", "--can-interface", "virtual",
+                        "--can-channel", "vcan_cli_tx", "--duration", "0.2",
+                        "--no-browser", "--http-port", "0"])
+        self.assertEqual(ret, 0)
+
+    def test_csv_logging_path(self):
+        out_csv = os.path.join(self.tmp, "cli_test.csv")
+        ret = self.run_cli("--csv", out_csv)
+        self.assertEqual(ret, 0)
+        self.assertTrue(os.path.exists(out_csv))
+
+    def test_csv_cannot_open_reports_error(self):
+        ret = self.run_cli("--csv", "/nonexistent_dir/impossible/out.csv")
+        self.assertEqual(ret, 2)
+
+    def test_http_port_busy_reports_error(self):
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.listen(1)
+        try:
+            ret = self.run_cli("--http-port", str(port))
+            self.assertEqual(ret, 2)
+        finally:
+            sock.close()
+
+    def test_console_flag(self):
+        from unittest import mock
+        with mock.patch("bms_monitor.console.main", return_value=0):
+            ret = cli.main(["--console", "--source", "serial", "--port", "loop://"])
+            self.assertEqual(ret, 0)
+
+    def test_try_open_function(self):
+        from unittest import mock
+        with mock.patch("webbrowser.open", side_effect=Exception("browser error")):
+            cli._try_open("http://127.0.0.1:0")
+
+    def test_build_source_unknown_raises(self):
+        args = parse()
+        args.source = "unknown_source"
+        with self.assertRaises(SystemExit):
+            cli._build_source(args, (4,))
+
+    def test_build_source_serial(self):
+        args = parse("--source", "serial", "--port", "loop://")
+        source = cli._build_source(args, (4,))
+        self.assertEqual(source.name, "serial")
+
+    def test_serial_source_cli_run(self):
+        ret = cli.main(["--source", "serial", "--port", "loop://",
+                        "--poll", "4,15", "--duration", "0.2",
+                        "--no-browser", "--http-port", "0"])
+        self.assertEqual(ret, 0)
+
+    def test_build_source_error_exits_2(self):
+        from unittest import mock
+        with mock.patch("bms_monitor.cli._build_source", side_effect=RuntimeError("build fail")):
+            self.assertEqual(self.run_cli(), 2)
+
+    def test_source_start_error_exits_2(self):
+        from unittest import mock
+        with mock.patch("bms_monitor.sources.replay.ReplaySource.start", side_effect=RuntimeError("start fail")):
+            self.assertEqual(self.run_cli(), 2)
 
 
 if __name__ == "__main__":

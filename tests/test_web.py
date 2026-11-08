@@ -254,10 +254,6 @@ class TestServerLifecycle(unittest.TestCase):
         self.assertEqual(leaked, set())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCsvExport(WebTestCase):
     """GET /api/export.csv, which the header's Export button downloads."""
 
@@ -302,3 +298,7 @@ class TestCsvExport(WebTestCase):
             self.fail("POST to the export endpoint was accepted")
         except urllib.error.HTTPError as exc:
             self.assertEqual(exc.code, 405)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -137,10 +137,6 @@ class TestCsvLogger(CsvTestCase):
         self.assertLess(hourly_mb, 12.0, "%.1f MB/hour" % hourly_mb)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMultiIcCsvRoundTrip(CsvTestCase):
     """The CSV is the replay format, so it has to survive a round trip,
     including cycles that carry no numbers."""
@@ -318,3 +314,7 @@ class TestTempCsvLogger(CsvTestCase):
         log.write(partial)
         log.close()
         self.assertFalse(os.path.exists(self.path))
+
+
+if __name__ == "__main__":
+    unittest.main()

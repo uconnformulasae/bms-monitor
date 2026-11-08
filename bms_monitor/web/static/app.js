@@ -198,8 +198,15 @@
       .then((data) => {
         applyConfig(data.config);
         state.tx = (data.tx && data.tx.balance_test) ? data.tx : null;
-        state.packs = [];
-        for (const p of data.samples) pushPack(p);
+        if (!state.packs.length) {
+          for (const p of data.samples) pushPack(p);
+        } else {
+          const existing = new Set(state.packs.map(p => p.seq));
+          for (const p of data.samples) {
+            if (!existing.has(p.seq)) pushPack(p);
+          }
+          state.packs.sort((a, b) => a.t - b.t);
+        }
         state.aux = [];
         for (const a of (data.aux || [])) pushAux(a);
         state.canTempHist = (data.can_temps_history || []).slice(-MAX_CAN_TEMPS);
@@ -370,6 +377,9 @@
     const linkUp = state.connected && st.link && st.link.link === 'up';
     const settling = state.balRequested !== null
       && (Date.now() - state.balRequestedAt) < BAL_SETTLE_MS;
+    if (state.balRequested !== null && !settling && balanceFirmwareOn(sum) === state.balRequested) {
+      state.balRequested = null;
+    }
 
     /* The controller is the authority on whether the test is armed. Our own
      * request only wins while it is in flight. */
@@ -1289,7 +1299,8 @@
       return;
     }
 
-    if (latest) {
+    if (latest && (s.lastT === undefined || latest.t > s.lastT)) {
+      s.lastT = latest.t;
       s.samples.push({ t: latest.t, v: latest.v });
       if (s.samples.length > 20000) s.samples.splice(0, s.samples.length - 20000);
       s.endSpread = latest.v;

@@ -54,6 +54,7 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "bms-monitor"
     sys_version = ""
+    timeout = 10.0
 
     # -- plumbing ----------------------------------------------------------
 
@@ -217,6 +218,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, body, _guess_type(full))
 
     def _serve_stream(self):
+        self.close_connection = True
         hub = self.server.hub
         client = hub.add_client()
         if client is None:

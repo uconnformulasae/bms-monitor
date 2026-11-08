@@ -133,7 +133,11 @@ class Hub:
                         "celsius": [s.get("celsius") for s in payload.get("sensors", [])],
                     })
                     if self._temp_csv is not None:
-                        self._temp_csv.write(payload)
+                        try:
+                            self._temp_csv.write(payload)
+                        except Exception as exc:
+                            self.events.append({"kind": "csv_error", "text": "Temperature CSV logger error: %s" % exc})
+                            self._temp_csv = None
                 self._broadcast("temps", payload)
             elif kind == "summary":
                 # Pack-level values from the controller over CAN, stored
@@ -142,8 +146,9 @@ class Hub:
                     self._summary = dict(payload)
                 self._broadcast("summary", payload)
             elif kind == "status":
-                self._status_polled = True
-                self._status_fields = payload
+                with self._lock:
+                    self._status_polled = True
+                    self._status_fields = dict(payload)
                 self._broadcast("status", payload)
             elif kind == "event":
                 item = {"kind": payload.kind, "text": payload.text}
@@ -152,7 +157,8 @@ class Hub:
                                     "firmware_error", "parser_error"):
                     self._broadcast("event", item)
             elif kind == "link":
-                self._link = payload
+                with self._lock:
+                    self._link = dict(payload)
                 self._broadcast("link", payload)
         except Exception:                            # pragma: no cover
             pass
@@ -176,7 +182,11 @@ class Hub:
                 self._last_usable_t = now
         self.samples.append(pack)
         if self._csv is not None:
-            self._csv.write(pack)
+            try:
+                self._csv.write(pack)
+            except Exception as exc:
+                self.events.append({"kind": "csv_error", "text": "CSV logger error: %s" % exc})
+                self._csv = None
         self._broadcast("sample", pack.to_json())
 
     def _on_aux(self, reading) -> None:
@@ -369,8 +379,10 @@ class Hub:
                  temp_history: int = 1200) -> dict:
         """Everything a freshly loaded page needs in one request, so a reload
         doesn't start with empty charts."""
+        with self._lock:
+            latest = self._latest
+        stats_val = self.stats()
         samples = self.samples.snapshot(limit=history)
-        latest = self._latest
         return {
             "cell_count": CELL_COUNT,
             "config": dict(self._ui_config),
@@ -381,8 +393,34 @@ class Hub:
             "can_temps_history": self.can_temps_history.snapshot(limit=temp_history),
             "raw_lines": self.raw_lines.snapshot(limit=300),
             "events": self.events.snapshot(limit=100),
-            "stats": self.stats(),
+            "stats": stats_val,
         }
+
+    def reset(self) -> None:
+        """Reset hub history and counters to initial baseline."""
+        with self._lock:
+            self.samples.reset()
+            self.raw_lines.reset()
+            self.events.reset()
+            self.aux.reset()
+            self.can_temps_history.reset()
+            self._latest = None
+            self._latest_aux.clear()
+            self._summary.clear()
+            self._can_temps.clear()
+            self._chain_window.clear()
+            self._pec_window.clear()
+            self._rate_times.clear()
+            self._status_fields.clear()
+            self._status_polled = False
+            self.total_samples = 0
+            self.total_pec_errors = 0
+            self.total_ccount_jumps = 0
+            self.total_partial_cycles = 0
+            self.total_aux = 0
+            self._t0 = time.monotonic()
+            self._last_sample_t = None
+            self._last_usable_t = None
 
     def export_csv(self) -> str:
         """The full retained history (not just the snapshot window) as a

@@ -50,6 +50,24 @@ class TestRingBuffer(unittest.TestCase):
         rb.clear()
         self.assertEqual(len(rb), 0)
 
+    def test_snapshot_non_positive_limit(self):
+        rb = RingBuffer(10)
+        rb.extend(range(5))
+        self.assertEqual(rb.snapshot(limit=0), [])
+        self.assertEqual(rb.snapshot(limit=-5), [])
+
+    def test_reset(self):
+        rb = RingBuffer(5)
+        for i in range(10):
+            rb.append(i)
+        self.assertEqual(len(rb), 5)
+        self.assertEqual(rb.dropped, 5)
+        self.assertEqual(rb.next_seq, 10)
+        rb.reset()
+        self.assertEqual(len(rb), 0)
+        self.assertEqual(rb.dropped, 0)
+        self.assertEqual(rb.next_seq, 0)
+
 
 class TestHubBounds(unittest.TestCase):
     def test_bounded_over_100k_samples(self):
@@ -289,6 +307,58 @@ class TestHubNeverRaises(unittest.TestCase):
         hub = Hub()
         hub.attach(Broken())
         self.assertEqual(hub.stats()["source"], {})
+
+    def test_csv_logger_error_is_swallowed_and_logged(self):
+        class FailingCsv:
+            def write(self, pack):
+                raise OSError("disk full")
+
+        hub = Hub(csv_logger=FailingCsv())
+        hub._on_sample(sample(0))
+        self.assertIsNone(hub._csv)
+        events = hub.events.snapshot()
+        self.assertTrue(any(e["kind"] == "csv_error" for e in events))
+
+    def test_temp_csv_logger_error_is_swallowed_and_logged(self):
+        class FailingTempCsv:
+            def write(self, payload):
+                raise OSError("disk full")
+
+        hub = Hub(temp_csv_logger=FailingTempCsv())
+        hub._on_source_event("temps", {"complete": True, "t": 1.0, "sensors": []})
+        self.assertIsNone(hub._temp_csv)
+        events = hub.events.snapshot()
+        self.assertTrue(any(e["kind"] == "csv_error" for e in events))
+
+    def test_aux_event_handling_and_snapshot(self):
+        from bms_monitor.model import AuxReading
+        reading = AuxReading(ic=1, t_mono=1.0, channels=(1.2, 2.3), vmv=None,
+                             vplus=None, ccount=1, pec_ok=True)
+        hub = Hub()
+        hub._on_source_event("aux", reading)
+        self.assertEqual(hub.total_aux, 1)
+        self.assertEqual(len(hub.aux), 1)
+        snap = hub.snapshot()
+        self.assertEqual(len(snap["aux"]), 1)
+        self.assertEqual(snap["aux"][0]["ic"], 1)
+
+    def test_hub_reset_restores_initial_state(self):
+        hub = Hub()
+        hub._on_sample(sample(0))
+        self.assertEqual(hub.total_samples, 1)
+        self.assertIsNotNone(hub._latest)
+        hub.reset()
+        self.assertEqual(hub.total_samples, 0)
+        self.assertIsNone(hub._latest)
+        self.assertEqual(len(hub.samples), 0)
+
+    def test_export_csv_output(self):
+        hub = Hub()
+        self.assertEqual(hub.export_csv(), "")
+        hub._on_sample(sample(0))
+        csv_text = hub.export_csv()
+        self.assertIn("t_wall", csv_text)
+        self.assertIn("ic1_c1", csv_text)
 
 
 if __name__ == "__main__":

@@ -441,6 +441,9 @@ def decode_ic_status(can_id: int, data: bytes) -> dict:
     if len(data) != 8:
         raise ValueError("per-IC payload must be 8 bytes, got %d" % len(data))
     ic, bits, counter, consec, temp, balancing = struct.unpack("<BBBBhH", data)
+    if ic != frame_index:
+        raise ValueError("payload IC index %d does not match arbitration frame %d"
+                         % (ic, frame_index))
     return {
         "ic_index": ic,
         "frame": frame_index,
@@ -541,7 +544,7 @@ def decode_chain_status(data: bytes) -> dict:
         "balance_ic": bal_ic + 1 if has_ic else None,
         "balance_cell": bal_cell + 1 if has_cell else None,
         "balance_margin_mv": (data[7] / 10.0
-                              if name in BALANCE_ROUND_STATES and data[7] else None),
+                              if name in BALANCE_ROUND_STATES else None),
     }
 
 

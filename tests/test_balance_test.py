@@ -202,20 +202,26 @@ class TestCanSend(unittest.TestCase):
         self.assertEqual(bytes(message.data), b"\x01\xA5")
         self.assertTrue(wait_for(lambda: source.status()["tx"]["sent"] == 1))
 
-    def run_bursts(self, controller, period, stop, sent_at):
+    def run_bursts(self, controller, period, stop_event, sent_at):
         """Send a 6-frame burst every `period` s, like the F105 at 10 Hz,
         noting when each frame went out."""
         cycle = 0
-        while not stop[0]:
+        while not stop_event.is_set():
             frames = [F.encode_chain_status(1, cycle, 0)]
             frames += [F.encode_cells(n, [3.6] * 4) for n in range(5)]
             for can_id, data in frames:
-                controller.send(can.Message(arbitration_id=can_id, data=data,
-                                            is_extended_id=False))
+                if stop_event.is_set():
+                    return
+                try:
+                    controller.send(can.Message(arbitration_id=can_id, data=data,
+                                                is_extended_id=False))
+                except Exception:
+                    return
                 sent_at.append(time.monotonic())
                 time.sleep(0.0005)
             cycle += 1
-            time.sleep(period)
+            if stop_event.wait(period):
+                return
 
     def test_transmit_waits_for_the_gap_between_bursts(self):
         # The CANdapter corrupts the frame it is forwarding if a command
@@ -226,11 +232,15 @@ class TestCanSend(unittest.TestCase):
 
         control = BalanceTestControl()
         source, controller = self.start(control)
-        stop, sent_at = [False], []
+        stop_event = threading.Event()
+        sent_at = []
         thread = threading.Thread(target=self.run_bursts,
-                                  args=(controller, 0.1, stop, sent_at), daemon=True)
+                                  args=(controller, 0.1, stop_event, sent_at), daemon=True)
         thread.start()
-        self.addCleanup(lambda: stop.__setitem__(0, True))
+        def cleanup_thread():
+            stop_event.set()
+            thread.join(timeout=1.0)
+        self.addCleanup(cleanup_thread)
         gaps = []
         for _ in range(8):
             time.sleep(0.15 + random.random() * 0.1)
@@ -254,11 +264,15 @@ class TestCanSend(unittest.TestCase):
 
         control = BalanceTestControl()
         source, controller = self.start(control)
-        stop, sent_at = [False], []
+        stop_event = threading.Event()
+        sent_at = []
         thread = threading.Thread(target=self.run_bursts,
-                                  args=(controller, 0.002, stop, sent_at), daemon=True)
+                                  args=(controller, 0.002, stop_event, sent_at), daemon=True)
         thread.start()
-        self.addCleanup(lambda: stop.__setitem__(0, True))
+        def cleanup_thread():
+            stop_event.set()
+            thread.join(timeout=1.0)
+        self.addCleanup(cleanup_thread)
         time.sleep(0.2)
         asked = time.monotonic()
         control.request(True)

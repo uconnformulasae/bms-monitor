@@ -9,8 +9,11 @@ every expected IC answered with a good PEC.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
+
+_SLOTS = {"slots": True} if sys.version_info >= (3, 10) else {}
 
 # ---------------------------------------------------------------------------
 # Firmware constants (verified against ADBMS6830/program/src/*.c)
@@ -50,6 +53,12 @@ def code_to_volts(code: int) -> float:
 
 def volts_to_code(volts: float) -> int:
     """Inverse of :func:`code_to_volts`, clamped to int16."""
+    if volts is None or not math.isfinite(volts):
+        return -CODE_OFFSET
+    if volts >= 7.0:
+        return 32767
+    if volts <= -4.0:
+        return -32768
     code = round(volts / VOLTS_PER_LSB) - CODE_OFFSET
     return max(-32768, min(32767, int(code)))
 
@@ -94,7 +103,7 @@ CHANNEL_COUNTS = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class CellRecord:
     """One printVoltages() line.
 
@@ -120,7 +129,7 @@ class CellRecord:
         return CHANNEL_COUNTS.get(self.kind, 0)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class StatusRecord:
     """One line from printStatus().  ``group`` is 'A'..'E' or '' when the
     line arrived before any 'Status X:' header."""
@@ -130,7 +139,7 @@ class StatusRecord:
     raw: str = ""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class EventRecord:
     """A non-measurement line worth showing: ack, menu, conversion done,
     error text, IC header."""
@@ -140,7 +149,7 @@ class EventRecord:
     value: Optional[int] = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class UnparsedRecord:
     """A line we could not classify. Never discarded; it goes to the raw
     console view."""
@@ -153,7 +162,7 @@ class UnparsedRecord:
 # Sample: what the UI plots
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class Sample:
     seq: int
     t_mono: float           # seconds since the source started
@@ -195,19 +204,19 @@ class Sample:
 
     @property
     def min_v(self) -> float:
-        return min(self.cells)
+        return min(self.cells) if self.cells else 0.0
 
     @property
     def max_v(self) -> float:
-        return max(self.cells)
+        return max(self.cells) if self.cells else 0.0
 
     @property
     def min_index(self) -> int:
-        return self.cells.index(self.min_v)
+        return self.cells.index(self.min_v) if self.cells else 0
 
     @property
     def max_index(self) -> int:
-        return self.cells.index(self.max_v)
+        return self.cells.index(self.max_v) if self.cells else 0
 
     @property
     def mean_v(self) -> float:
@@ -243,7 +252,7 @@ class Sample:
 # poll cycle, so "IC1 fine, IC2 silent" stays visible instead of being
 # averaged away.
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class PackSample:
     seq: int
     t_mono: float
@@ -252,6 +261,14 @@ class PackSample:
     expected_ics: int
     cells_per_ic: int         # populated channels per IC; the rest are masked
     stale: bool = False       # warm-up
+    _cells_cache: tuple = field(init=False, repr=False, compare=False, default=())
+
+    def __post_init__(self) -> None:
+        cells = []
+        for reading in self.readings:
+            for index, volts in enumerate(self.masked(reading)):
+                cells.append((reading.ic, index + 1, volts))
+        object.__setattr__(self, "_cells_cache", tuple(cells))
 
     # -- chain state -------------------------------------------------------
 
@@ -307,15 +324,11 @@ class PackSample:
     def cell_list(self) -> list:
         """``[(ic, cell_index_1based, volts), ...]`` across the whole chain,
         masked, in chain order."""
-        out = []
-        for reading in self.readings:
-            for index, volts in enumerate(self.masked(reading)):
-                out.append((reading.ic, index + 1, volts))
-        return out
+        return list(self._cells_cache)
 
     @property
     def cell_count(self) -> int:
-        return sum(len(self.masked(r)) for r in self.readings)
+        return len(self._cells_cache)
 
     # -- aggregates. None when the data does not support them --------------
 
@@ -323,22 +336,20 @@ class PackSample:
     def pack_v(self) -> Optional[float]:
         """Sum across the whole chain, or ``None`` unless every expected IC
         answered with a good PEC."""
-        if not self.usable:
+        if not self.usable or not self._cells_cache:
             return None
-        return sum(v for _, _, v in self.cell_list())
+        return sum(v for _, _, v in self._cells_cache)
 
     @property
     def mean_v(self) -> Optional[float]:
-        cells = self.cell_list()
-        if not self.usable or not cells:
+        if not self.usable or not self._cells_cache:
             return None
-        return sum(v for _, _, v in cells) / len(cells)
+        return sum(v for _, _, v in self._cells_cache) / len(self._cells_cache)
 
     def _extreme(self, pick):
-        cells = self.cell_list()
-        if not self.usable or not cells:
+        if not self.usable or not self._cells_cache:
             return None
-        return pick(cells, key=lambda item: item[2])
+        return pick(self._cells_cache, key=lambda item: item[2])
 
     @property
     def min_cell(self):
@@ -388,7 +399,7 @@ class PackSample:
 # AUX / temperature
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class AuxReading:
     """One printVoltages() AUX line: 10 GPIO channels plus VMV and V+.
 
@@ -416,7 +427,7 @@ class AuxReading:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, **_SLOTS)
 class NtcConfig:
     """Thermistor divider description (beta and the divider vary by part and
     board revision).

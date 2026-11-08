@@ -169,12 +169,135 @@ class TestPortDiscovery(unittest.TestCase):
             self.assertGreater(entry["score"], 0)
 
     def test_discovery_on_this_machine_returns_only_qualified_ports(self):
-        from bms_monitor.sources.serial_source import list_candidate_ports, port_score
-        for entry in list_candidate_ports():
-            self.assertEqual(
-                entry["score"],
-                port_score(entry["device"], entry["description"],
-                           entry["vid"], entry["pid"]))
+        from bms_monitor.sources.serial_source import port_score, STLINK_VID, STLINK_PID
+        # Ideal ST-Link VCP on macOS /dev/cu.
+        self.assertEqual(port_score("/dev/cu.usbmodem14103", "STM32 STLink", STLINK_VID, STLINK_PID), 155)
+        # Linux standard ST-Link /dev/ttyACM0
+        self.assertEqual(port_score("/dev/ttyACM0", "STMicroelectronics ST-LINK/V2-1", STLINK_VID, STLINK_PID), 150)
+        # Blocking macOS /dev/tty port penalized by tiebreaker
+        self.assertEqual(port_score("/dev/tty.usbmodem14103", "STM32 STLink", STLINK_VID, STLINK_PID), 100)
+        # Bluetooth or foreign serial port returns 0 (unqualified)
+        self.assertEqual(port_score("/dev/cu.Bluetooth-Incoming-Port", "Bluetooth Port", None, None), 0)
+        self.assertEqual(port_score("/dev/cu.usbserial-FT123", "FTDI Device", 0x0403, 0x6001), 0)
+
+    def test_candidate_ports_handles_comports_exception(self):
+        from unittest import mock
+        from bms_monitor.sources.serial_source import list_candidate_ports
+        with mock.patch("serial.tools.list_ports.comports", side_effect=Exception("error")):
+            self.assertEqual(list_candidate_ports(), [])
+
+
+@unittest.skipUnless(HAVE_PYSERIAL, SKIP_REASON)
+class TestSerialSourceInternals(unittest.TestCase):
+    def test_start_when_already_started_is_noop(self):
+        from bms_monitor.sources.serial_source import SerialSource
+        src = SerialSource(port="loop://")
+        src._thread = threading.Thread(target=lambda: None)
+        src.start()
+        self.assertIsNotNone(src._thread)
+
+    def test_close_port_ignores_exceptions(self):
+        from bms_monitor.sources.serial_source import SerialSource
+        src = SerialSource(port="loop://")
+        class BadPort:
+            def close(self):
+                raise OSError("close error")
+        src._serial = BadPort()
+        src._close_port()
+        self.assertIsNone(src._serial)
+
+    def test_resolve_port_auto_empty_raises(self):
+        from unittest import mock
+        from bms_monitor.sources.serial_source import SerialSource
+        src = SerialSource(port="auto")
+        with mock.patch("bms_monitor.sources.serial_source.list_candidate_ports", return_value=[]):
+            with self.assertRaises(RuntimeError):
+                src._resolve_port()
+
+    def test_session_write_exception(self):
+        from bms_monitor.sources.serial_source import SerialSource
+        src = SerialSource(port="loop://", poll_plan=(4,))
+        class FailingWrite:
+            def write(self, data):
+                raise serial.SerialException("write exploded")
+            def flush(self):
+                pass
+        src._serial = FailingWrite()
+        src._session(serial)
+        status = src.status()
+        self.assertEqual(status["link"], "reconnecting")
+        self.assertIn("write exploded", status["last_error"])
+
+    def test_session_read_exception(self):
+        from bms_monitor.sources.serial_source import SerialSource
+        src = SerialSource(port="loop://", poll_plan=(4,))
+        class FailingRead:
+            in_waiting = 1
+            def write(self, data):
+                pass
+            def flush(self):
+                pass
+            def read(self, n):
+                raise serial.SerialException("read exploded")
+        src._serial = FailingRead()
+        src._session(serial)
+        status = src.status()
+        self.assertEqual(status["link"], "reconnecting")
+        self.assertIn("read exploded", status["last_error"])
+
+    def test_session_cmd_timeout_event(self):
+        from bms_monitor.sources.serial_source import SerialSource
+        src = SerialSource(port="loop://", poll_plan=(4,), cmd_timeout=0.01)
+        events = []
+        src.subscribe(lambda kind, payload: events.append(payload) if kind == "event" else None)
+
+        class IdleSerial:
+            in_waiting = 0
+            def write(self, data):
+                pass
+            def flush(self):
+                pass
+            def read(self, n):
+                time.sleep(0.02)
+                return b""
+
+        src._serial = IdleSerial()
+        src._response_pending = True
+        # Set stop event after a brief delay so session loop runs once
+        threading.Timer(0.04, src._stop_event.set).start()
+        src._session(serial)
+        timeout_events = [e for e in events if getattr(e, "kind", "") == "cmd_timeout"]
+        self.assertGreaterEqual(len(timeout_events), 1)
+
+    def test_session_stall_watchdogs(self):
+        from bms_monitor.sources.serial_source import SerialSource, STALL_TIMEOUT_S
+        src = SerialSource(port="loop://", poll_plan=(4,))
+
+        class QuietSerial:
+            in_waiting = 0
+            def write(self, data):
+                pass
+            def flush(self):
+                pass
+            def read(self, n):
+                return b""
+
+        # Test line stall watchdog
+        src._serial = QuietSerial()
+        src._last_line_t = time.monotonic() - STALL_TIMEOUT_S - 2.0
+        src._session(serial)
+        status = src.status()
+        self.assertEqual(status["link"], "reconnecting")
+        self.assertIn("no output for", status["last_error"])
+
+        # Test sample stall watchdog
+        src._clear_error()
+        src._last_line_t = time.monotonic()
+        src._last_sample_t = time.monotonic() - STALL_TIMEOUT_S - 2.0
+        src._session(serial)
+        status = src.status()
+        self.assertEqual(status["link"], "reconnecting")
+        self.assertIn("no valid sample for", status["last_error"])
 
 
 if __name__ == "__main__":

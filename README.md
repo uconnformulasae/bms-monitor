@@ -1,3 +1,5 @@
+> **Moved.** This repo is now `headlines/` in [uconnformulasae/drake](https://github.com/uconnformulasae/drake), with its history, and the app is now called headlines (`python3 -m headlines`). It is archived and read-only.
+
 # BMS Monitor
 
 A display for the BMS. It runs on your laptop, connects to the BMS

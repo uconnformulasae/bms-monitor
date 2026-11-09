@@ -273,13 +273,20 @@ class TestF105Diagnostics(unittest.TestCase):
         ics = {e["ic"]: e for e in h.packs[-1].to_json()["ics"]}
         self.assertEqual(ics[2]["balance_mask"], 1 << 5)
 
-    def test_dcc_bits_are_unknown_when_the_status_read_failed(self):
+    def test_dcc_bits_are_kept_when_the_status_read_failed(self):
+        # The firmware sends the last DCC readback with a good PEC even when
+        # flag 0x01 is set, so a chip still discharging stays visible.
         h = F105Harness()
         h.run(0, 5)
-        h.feed(f105_cycle(5, ic_bits={1: F.IC_PEC_FAIL}))
+        frames = [f for f in f105_cycle(5) if f[0] != F.ID_IC_BASE + 1]
+        frames.append((F.ID_IC_BASE + 1, struct.pack("<BBBBhH", 1, F.IC_PEC_FAIL, 0, 0,
+                                                      F105_TEMP_UNKNOWN, 0x3FF)))
+        h.feed(frames)
         h.run(6, 1)
         chain = {c["ic"]: c for c in h.hub.stats()["chain"]}
-        self.assertIsNone(chain[2]["balance_mask"])
+        self.assertIs(chain[2]["status_ok"], False)
+        self.assertIsNone(chain[2]["flags"])
+        self.assertEqual(chain[2]["balance_mask"], 0x3FF)
 
     def test_dcc_bits_are_unknown_before_any_per_ic_frame(self):
         h = F105Harness()
@@ -297,6 +304,16 @@ class TestF105Diagnostics(unittest.TestCase):
         self.assertIsNotNone(F.decode(F.ID_IC_BASE, data)["die_temp_c"])
         _, data = F.encode_ic_status(0, 0, 0, 0, -5000.0, 0)
         self.assertIsNotNone(F.decode(F.ID_IC_BASE, data)["die_temp_c"])
+
+    def test_the_build_hash_reaches_the_summary(self):
+        h = F105Harness()
+        h.run(0, 3)
+        h.feed([(F.ID_VERSION, b"\x4d\x3c\x2b\x1a\x01")])
+        h.run(3, 2)
+        summary = h.hub.stats()["summary"]
+        self.assertEqual(summary["build_hash"], "1a2b3c4d")
+        self.assertIs(summary["build_dirty"], True)
+        self.assertEqual(h.source.status()["frames"]["unknown"], 0)
 
 
 class TestF105Temperatures(unittest.TestCase):

@@ -328,11 +328,11 @@ class TestCan2TempFrames(unittest.TestCase):
 class TestBusOwnership(unittest.TestCase):
     def test_owns_id_covers_both_buses_and_nothing_else(self):
         owned = (list(F.CAN1_IDS)
-                 + [F.ID_CHAIN_STATUS]          # 0x6FF, the controller's own
+                 + [F.ID_VERSION, F.ID_CHAIN_STATUS]   # 0x6FE, 0x6FF: the controller's own
                  + [0x700, 0x716, 0x720, 0x729, 0x730, 0x734])
         for can_id in owned:
             self.assertTrue(F.owns_id(can_id), hex(can_id))
-        for can_id in (0x000, 0x100, 0x5FF, 0x603, 0x610, 0x6FE, 0x717,
+        for can_id in (0x000, 0x100, 0x5FF, 0x603, 0x610, 0x6FD, 0x717,
                        0x71F, 0x72A, 0x735, 0x7FF):
             self.assertFalse(F.owns_id(can_id), hex(can_id))
 

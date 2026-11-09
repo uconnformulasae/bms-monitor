@@ -46,11 +46,10 @@ PEC error totals and where the CSV log is going.
 
 Which cells are discharging comes from the controller's DCC bits in the
 per-IC frames. Those only arrive twice a second, so the marks can lag by up
-to half a second. While balancing (`--allow-tx`, see
-[can.md](can.md#balancing)) the groups in the current round are marked, and
-an IC box reads `↯ all` when every group on it is. When the controller
-reports a rest, balanced or a stop, the marks go at once rather than
-waiting for the next per-IC frame.
+to half a second. They are the chips' own readback, so they are shown in
+every balance state (`--allow-tx`, see [can.md](can.md#balancing)). A chip
+still discharging after a stop stays marked. An IC box reads `↯ all` when
+every cell on it is discharging.
 Nothing is marked when the data isn't live or during replay.
 
 ## Charge tab

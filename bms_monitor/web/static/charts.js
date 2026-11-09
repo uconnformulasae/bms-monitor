@@ -277,25 +277,15 @@ function dccChannels(mask) {
   return out;
 }
 
-/* Balancing states in which the controller owns the DCC bits. */
-const BALANCE_TEST_BUSY = {
-  pending: 1, discharging: 1, resting: 1, balanced: 1, refused: 1, aborted: 1,
-  too_hot: 1, cell_low: 1
-};
-
 /* Cells being discharged right now: [{ic, cell, key, source}].
  *
- * - While a balancing round discharges, the DCC bits are used. In the
- *   other balancing states nothing is discharging, even if a 2 Hz per-IC
- *   frame from a moment ago still carries DCC bits.
- * - Otherwise (test off, or firmware without it) the per-IC DCC bits from
- *   0x72n are used, cut to the populated cells like everything else.
- * - Nothing when the data isn't live: a frozen summary would look current. */
-function dischargingCells(summary, pack, live) {
-  if (!live) return [];
-  const sum = summary || {};
-  const discharging = sum.balance_state === 'discharging';
-  if ((BALANCE_TEST_BUSY[sum.balance_state] && !discharging) || !pack) return [];
+ * From the per-IC DCC bits in 0x72n, cut to the populated cells. They are
+ * the chips' own readback, so they are shown whatever the balance state: a
+ * chip still discharging after a stop must stay visible. They arrive at
+ * 2 Hz, so a mark can outlast a stop by up to half a second.
+ * Nothing when the data isn't live: a frozen pack would look current. */
+function dischargingCells(pack, live) {
+  if (!live || !pack) return [];
   const cpi = pack.cells_per_ic || 16;
   const out = [];
   for (const entry of (pack.ics || [])) {
@@ -308,28 +298,6 @@ function dischargingCells(summary, pack, live) {
     }
   }
   return out;
-}
-
-/* Balancing target and what is left, from one pack's readings:
- * {lowest: {ic, cell, v}, target, above: [{ic, cell, key, mv}]}, with
- * target = the lowest group (named in 0x6FF) + the margin, and `above` the
- * groups over it, most first. Null when 0x6FF names no group or margin, or
- * the pack has no reading for that group. Pass a pack taken at rest: during
- * discharge the readings sag. */
-function balanceProgress(summary, pack) {
-  const sum = summary || {};
-  if (!pack || !sum.balance_ic || !sum.balance_cell || typeof sum.balance_margin_mv !== 'number') {
-    return null;
-  }
-  const cells = flatCells(pack);
-  const low = cells.find((c) => c.ic === sum.balance_ic && c.cell === sum.balance_cell);
-  if (!low || typeof low.v !== 'number') return null;
-  const target = low.v + sum.balance_margin_mv / 1000;
-  const above = cells
-    .filter((c) => typeof c.v === 'number' && c.v > target + 1e-9)
-    .map((c) => ({ ic: c.ic, cell: c.cell, key: c.key, mv: (c.v - target) * 1000 }))
-    .sort((a, b) => b.mv - a.mv);
-  return { lowest: { ic: low.ic, cell: low.cell, v: low.v }, target: target, above: above };
 }
 
 /* [{ic, cell, v, key}] in chain order, masked to the populated count. */
@@ -1139,7 +1107,7 @@ window.Charts = {
   scaleLinear, scaleInvert, niceStep, decimalsFor, niceTicks, autoscale,
   segmentPaths, windowSlice, nearestIndex, formatFixed,
   packUsable, flatCells, packStats, packStatsFor, expectedKeys, valueFor, cellKey,
-  dccChannels, dischargingCells, balanceProgress,
+  dccChannels, dischargingCells,
   segmentOf, segmentCount, segmentIcs, cellViewPanels, panelColumns,
   cellViewHeight,
   drawCellView, drawTimeSeries, drawTrend, drawSparkline, prepCanvas, theme

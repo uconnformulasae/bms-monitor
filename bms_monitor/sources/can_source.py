@@ -3,7 +3,7 @@
 python-can is imported lazily so the serial path doesn't need it. Frame
 layout is in can_frames.py. CAN1 summary frames are decoded if they show up.
 
-The F105 (``BMS/App/Src/bms_monitor.c``) sends 0x6FF chain status first in
+The F105 (``BMS/App/Src/telemetry.c``) sends 0x6FF chain status first in
 each cycle, then that cycle's cell frames, so each 0x6FF closes the open
 round. A repeated cell frame inside a round means a 0x6FF was lost. Until
 the first 0x6FF is seen, a 0x700 closes the round instead.
@@ -11,6 +11,8 @@ the first 0x6FF is seen, a 0x700 closes the round instead.
 With 0x6FF, a chip's cells are valid unless the chain-status bitmap lists it
 or a cell is 0xFFFF; pec_fail on its per-IC frame only means the status read
 failed. Without 0x6FF, a chip needs a fresh per-IC frame with no pec_fail.
+A per-IC frame's DCC bits are kept either way: the firmware sends the last
+good readback, so a chip still discharging stays visible.
 """
 
 from __future__ import annotations
@@ -108,9 +110,11 @@ class CanSource(TelemetrySource):
         # The 0x6FF that opened the round currently being assembled.
         self._round_status: Optional[dict] = None
         self._odd_logged = 0
+        # The last 0x740 payload sent, so ON repeats don't each log a line.
+        self._last_tx_data: Optional[bytes] = None
         self._frames = {"cells": 0, "ic": 0, "temperatures": 0,
                         "summary": 0, "extremes": 0, "status": 0,
-                        "unknown": 0, "bad": 0}
+                        "version": 0, "unknown": 0, "bad": 0}
 
     # -- TelemetrySource ---------------------------------------------------
 
@@ -227,6 +231,7 @@ class CanSource(TelemetrySource):
                 self._since_linkup = 0
                 self._chain_mode = False
                 self._round_status = None
+            self._last_tx_data = None
             self._last_frame_t = time.monotonic()
             self._set_link(LINK_UP, error="")
             self._emit("line", "can: listening on %s:%s at %d bit/s (CAN2: chain "
@@ -265,7 +270,9 @@ class CanSource(TelemetrySource):
                 self._emit("line", "can: TX 0x%03X %s failed: %s" % (can_id, data.hex(" "), exc))
                 return False
             self._tx.note_sent()
-            self._emit("line", "can: %s TX 0x%03X %s" % (_stamp(), can_id, data.hex(" ")))
+            if data != self._last_tx_data:
+                self._emit("line", "can: %s TX 0x%03X %s" % (_stamp(), can_id, data.hex(" ")))
+                self._last_tx_data = data
             self._emit("can_frame", {
                 "t_wall": time.time(),
                 "t_mono": time.monotonic() - self._t0,
@@ -377,7 +384,7 @@ class CanSource(TelemetrySource):
         elif kind == "balance_cmd":
             self._emit("line", "can: another node sent balance test %s on 0x%03X"
                        % ("on" if decoded["enable"] else "off", decoded["id"]))
-        elif kind in ("summary", "extremes", "status"):
+        elif kind in ("summary", "extremes", "status", "version"):
             if decoded["id"] == F.ID_CHAIN_STATUS:
                 self._handle_chain_status(decoded)
             with self._lock:
@@ -571,10 +578,11 @@ class CanSource(TelemetrySource):
     def _reading(self, ic, volts, diag, pec_ok, now):
         padded = tuple(volts) + (0.0,) * (CELL_COUNT - len(volts))
         status_ok = None if diag is None else not diag.get("pec_fail")
-        flags = die_temp = ccount = balance_mask = None
+        flags = die_temp = ccount = None
+        # Sent even with pec_fail: the last DCC readback that had a good PEC.
+        balance_mask = diag.get("balancing_bitmap") if diag is not None else None
         if status_ok:
             flags = tuple(f for f in diag.get("flags", ()) if f != "pec_fail")
-            balance_mask = diag.get("balancing_bitmap")
             die_temp = diag.get("die_temp_c")
             if die_temp is not None:
                 die_temp = round(die_temp, 1)   # the wire carries 0.1 degC

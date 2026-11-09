@@ -41,8 +41,6 @@
     stats: null, summary: null, config: Object.assign({}, DEFAULTS),
     /* Balance test (--allow-tx only): what we last asked for, and when. */
     tx: null, balRequested: null, balRequestedAt: 0, balError: '', balBusy: false,
-    /* Latest pack read while nothing was discharging, for the balancing target. */
-    balRestPack: null,
     tab: 'live',
     windowS: 30, chgWindowS: 120,
     pinned: null, paused: false, hoverX: null, connected: false,
@@ -377,24 +375,10 @@
     const st = state.stats || {};
     const live = state.mode !== 'replay' && state.connected
       && !!st.link && st.link.link === 'up' && st.data_state === 'live';
-    const cells = C.dischargingCells(state.summary, latestPack(), live);
+    const cells = C.dischargingCells(latestPack(), live);
     const byKey = {};
     for (const c of cells) byKey[c.key] = c;
     return { cells: cells, byKey: byKey };
-  }
-
-  /* "Target 3.5960 V (IC1 cell 1 + 1.0 mV). Above it at the last rest: ..." */
-  function balanceProgressText(sum) {
-    const p = C.balanceProgress(sum, state.balRestPack);
-    if (!p) return '';
-    let text = 'Target ' + p.target.toFixed(4) + ' V (IC' + p.lowest.ic + ' cell ' + p.lowest.cell
-      + ' + ' + sum.balance_margin_mv.toFixed(1) + ' mV).';
-    if (p.above.length) {
-      const shown = p.above.slice(0, 5).map((a) => 'IC' + a.ic + ' C' + a.cell + ' +' + a.mv.toFixed(1) + ' mV');
-      text += ' Above it at the last rest: ' + shown.join(', ')
-        + (p.above.length > 5 ? ', and ' + (p.above.length - 5) + ' more' : '') + '.';
-    }
-    return text;
   }
 
   function renderBalance() {
@@ -404,10 +388,6 @@
 
     const sum = state.summary || {};
     const haveStatus = typeof sum.balance_state === 'string';
-    /* Readings sag while discharging, so progress comes from a rest reading. */
-    if (haveStatus && sum.balance_state !== 'discharging' && latestPack()) {
-      state.balRestPack = latestPack();
-    }
     const st = state.stats || {};
     const linkUp = state.connected && st.link && st.link.link === 'up';
     const settling = state.balRequested !== null
@@ -440,7 +420,7 @@
       switch (sum.balance_state) {
         case 'off':
           text = settling ? 'Sending...' : 'Off.';
-          detail = 'Turn on to discharge the groups above the lowest until they are within the margin.';
+          detail = 'Turn on to discharge every cell on every IC until you turn it off.';
           break;
         case 'pending':
           text = 'Armed, waiting for the next measurement cycle...';
@@ -448,25 +428,16 @@
           break;
         case 'discharging': {
           const n = currentDischarge().cells.length;
-          text = 'Discharging ' + (n ? n + ' group' + (n === 1 ? '' : 's') : 'the high groups') + '.';
+          text = 'Discharging ' + (n ? n + ' cell' + (n === 1 ? '' : 's') : 'every cell') + '.';
           cls = 'active';
-          detail = [balanceProgressText(sum), hottestDie(),
-                    'Stops by itself at 80 \u00b0C for over 5 s.'].filter(Boolean).join(' ');
+          detail = [hottestDie(),
+                    'Stops by itself at 80 \u00b0C for over 5 s, at the undervoltage threshold,'
+                    + ' or if this monitor stops sending.'].filter(Boolean).join(' ');
           break;
         }
-        case 'resting':
-          text = 'Resting so the readings recover from the sag, then measuring again...';
-          cls = 'active';
-          detail = [balanceProgressText(sum), hottestDie()].filter(Boolean).join(' ');
-          break;
-        case 'balanced':
-          text = 'Balanced: every group is within '
-            + (typeof sum.balance_margin_mv === 'number' ? sum.balance_margin_mv.toFixed(1) + ' mV' : 'the margin')
-            + ' of ' + (sum.balance_ic && sum.balance_cell ? 'IC' + sum.balance_ic + ' cell ' + sum.balance_cell : 'the lowest group') + '.';
-          detail = 'Turn off, then on, to check again.';
-          break;
         case 'refused':
-          text = 'Refused: not every IC had valid data, or the DCC bits did not read back.';
+          text = 'Refused: not every IC had valid data, the DCC bits did not read back,'
+            + ' or an earlier discharge clear was still unconfirmed.';
           cls = 'bad';
           detail = 'Nothing was discharged. Turn off, then on, to try again.';
           break;
@@ -488,6 +459,18 @@
           cls = 'bad';
           detail = 'Turn off, then on, to start again.';
           break;
+        case 'timed_out':
+          text = 'Stopped: the controller heard no balance command for over 1 s.';
+          cls = 'bad';
+          detail = 'This monitor repeats it while the toggle is on, so the CAN link or the'
+            + ' adapter dropped it. Turn off, then on, to start again.';
+          break;
+        case 'no_data':
+          text = 'Stopped: ' + (sum.balance_ic ? 'IC' + sum.balance_ic : 'an IC')
+            + ' gave no valid cell data for 3 cycles in a row.';
+          cls = 'bad';
+          detail = 'Turn off, then on, to start again.';
+          break;
         default:
           text = 'Unknown balance state from the controller.';
           cls = 'bad';
@@ -495,6 +478,14 @@
     }
     if (state.balError) {
       detail = state.balError;
+      cls = 'bad';
+    }
+    /* 0x6FF byte 7: the firmware turned discharge off but a chip has not
+     * read back as off. It retries every cycle; nothing else may hide this. */
+    if (linkUp && sum.dcc_unconfirmed) {
+      detail = 'Discharge off is not confirmed: an IC has not read back as off and the'
+        + ' controller is retrying. The DCC marks on the cell grid show which cells.'
+        + (detail ? ' ' + detail : '');
       cls = 'bad';
     }
     const status = $('balStatus');
@@ -505,7 +496,7 @@
 
   function sendBalance(enable) {
     if (!state.tx || state.balBusy) return;
-    if (enable && !window.confirm('Balance the pack? The groups above the lowest are discharged until they are within the margin.')) return;
+    if (enable && !window.confirm('Start the balance test? Every cell on every IC is discharged until you turn it off.')) return;
     state.balBusy = true;
     state.balError = '';
     scheduleRender();
@@ -545,6 +536,13 @@
     return ['NO-DATA', 'critical'];
   }
 
+  /* The F105's build from 0x6FE, as tools/find_build.sh takes it. */
+  function firmwareLabel(sum) {
+    if (sum.build_no_git) return 'built without git';
+    if (typeof sum.build_hash !== 'string') return '—';
+    return sum.build_hash + (sum.build_dirty ? ' (uncommitted changes)' : '');
+  }
+
   function renderStatusBar() {
     const st = state.stats || {};
     const src = st.source || {};
@@ -575,6 +573,7 @@
     if (src.ics) label += ' · ' + src.ics + '×' + (src.cells_per_ic || '?') + ' cells';
     if (src.poll_plan && src.poll_plan.length) label += ' · poll ' + src.poll_plan.join(',');
     setText($('sourceText'), label);
+    setText($('firmwareText'), firmwareLabel(state.summary || {}));
 
     const link = (st.link && st.link.link) || 'down';
     setText($('linkText'), link.toUpperCase());

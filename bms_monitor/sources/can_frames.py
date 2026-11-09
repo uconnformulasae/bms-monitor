@@ -89,9 +89,13 @@ CHANNELS = [
 
 #: CAN2 channel families, one row per ID range instead of one per channel.
 CAN2_FAMILIES = [
+    ("0x6FE", "BMS_BuildVersion", "see note", 1.0, "",
+     "DLC 5, once a second: b0-3 build hash u32 LE, b4 flags "
+     "(0x01 uncommitted changes, 0x02 built without git)"),
     ("0x6FF", "BMS_ChainStatus", "see note", 1.0, "",
      "b0 chain state (0 starting up, 1 running), b1 cycle counter, "
-     "b2-3 bitmap of ICs with no valid data u16 LE"),
+     "b2-3 bitmap of ICs with no valid data u16 LE, b4 balance state, "
+     "b5 IC, b6 cell, b7 flags (0x01 DCC clear not confirmed)"),
     ("0x700-0x716", "BMS_Cell<4n+1..4n+4>", "4 x u16 LE", SCALE_CELL_V, "V",
      "23 frames, cells 1-90; 0x700 = cells 1-4. 0xFFFF means no reading; "
      "the last two slots of 0x716 carry it."),
@@ -169,7 +173,7 @@ def _s16(value: float, scale: float) -> int:
 
 
 #: s16 values that mean "no reading". The F105 uses INT16_MAX
-#: (``CAN_FRAMES_TEMP_UNKNOWN`` in ``BMS/App/Inc/can_frames.h``) and this
+#: (``BMS_CAN_TEMP_UNKNOWN`` in ``BMS/App/Inc/can_protocol.h``) and this
 #: codec encodes -32768, so both decode to None.
 S16_NO_DATA = (-32768, 32767)
 
@@ -287,41 +291,58 @@ def decode_status(data: bytes) -> dict:
 # This is the bus the F105 sends on and the one the monitor listens to.
 # Cell n is always in the same byte of the same ID.
 
+#: Build version, sent once a second by the F105 (``BMS_CAN_VERSION_ID`` in
+#: ``App/Inc/can_protocol.h``). DLC 5: the build hash, u32 LE, which is the
+#: first 8 hex digits of the firmware's flash-log commit
+#: (``tools/find_build.sh`` takes it), then a flags byte.
+ID_VERSION = 0x6FE
+VERSION_DLC = 5
+VERSION_DIRTY = 0x01         # built with uncommitted changes
+VERSION_NO_GIT = 0x02        # built without git, the hash is 0
+
 #: Chain-status frame, sent every cycle by the F105
-#: (``BMS_CAN_STATUS_ID`` in ``App/Inc/bms_config.h``).
+#: (``BMS_CAN_STATUS_ID`` in ``App/Inc/can_protocol.h``).
 #:
 #: It's below 0x700 so it wins arbitration over the cell frames. Not the
 #: same message as 0x602 (the CAN1 summary with SOC, fault bits and
 #: balancing count), which the F105 doesn't send.
 ID_CHAIN_STATUS = 0x6FF
 
-#: Chain-state byte values, matching CAN_FRAMES_CHAIN_* in the firmware.
+#: Chain-state byte values, matching BMS_CAN_CHAIN_* in the firmware.
 CHAIN_STATE_INIT = 0
 CHAIN_STATE_RUNNING = 1
 
-#: Balancing state, byte 4 of 0x6FF (CAN_FRAMES_BAL_* in the firmware).
+#: Balancing state, byte 4 of 0x6FF (BMS_CAN_BAL_* in the firmware).
 #: Firmware without balancing sends 0 there, which reads as "off".
+#: States 4 and up are stops: they stay until the host sends OFF.
 BALANCE_STATES = {
     0: "off",
     1: "pending",
     2: "discharging",
-    3: "balanced",
     4: "refused",
     5: "aborted",
     6: "too_hot",
     7: "cell_low",
-    8: "resting",
+    8: "timed_out",
+    9: "no_data",
 }
 
-#: States in which bytes 5-6 are the lowest group and byte 7 the margin.
-BALANCE_ROUND_STATES = ("discharging", "resting", "balanced")
+#: Bytes 5 and 6 of 0x6FF: the IC and cell a state refers to, or this.
 BALANCE_NO_CELL = 0xFF
+
+#: Byte 7 of 0x6FF (``BMS_CAN_BAL_DCC_UNCONFIRMED``): turning discharge off
+#: did not read back as off, and the firmware is still retrying.
+BALANCE_DCC_UNCONFIRMED = 0x01
 
 #: Balance test command, the only frame the monitor transmits
 #: (``BMS_CAN_BALANCE_CMD_ID``). Byte 0: 1 = on, 0 = off. Byte 1: key.
-#: While it's on, the controller balances the pack in rounds.
+#: While it's on, the controller discharges every wired cell.
 ID_BALANCE_CMD = 0x740
 BALANCE_CMD_KEY = 0xA5
+
+#: A discharge with no ON for longer than this stops
+#: (``BMS_BALANCE_CMD_TIMEOUT_MS``), so ON is repeated while it's wanted.
+BALANCE_CMD_TIMEOUT_S = 1.0
 
 #: First cell-voltage frame.  ``0x700`` = cells 1-4, ``0x701`` = 5-8, ...
 ID_CELLS_BASE = 0x700
@@ -346,7 +367,7 @@ TEMP_FRAME_COUNT = 5
 TEMP_SLOTS_PER_IC = 10
 ID_TEMPS_LAST = ID_TEMPS_BASE + TEMP_FRAME_COUNT - 1
 
-#: A slot with no thermistor fitted (``CAN_FRAMES_TEMP_NO_SENSOR``). The
+#: A slot with no thermistor fitted (``BMS_CAN_TEMP_NO_SENSOR``). The
 #: other sentinel, INT16_MAX, is a fitted probe with no reading: its chip
 #: did not answer, or the probe is open, shorted or off its rated range.
 TEMP_NO_SENSOR_RAW = -32768
@@ -502,12 +523,11 @@ def from_cell_index(index: int, cells_per_ic: int) -> Tuple[int, int]:
 
 
 def encode_chain_status(chain_state: int, cycle: int, invalid_ics: int,
-                        balance_state: int = 0, balance_ic: int = 0,
-                        balance_cell: int = 0,
-                        balance_margin_0p1mv: int = 0) -> Tuple[int, bytes]:
+                        balance_state: int = 0, balance_ic: int = BALANCE_NO_CELL,
+                        balance_cell: int = BALANCE_NO_CELL,
+                        balance_flags: int = 0) -> Tuple[int, bytes]:
     """``0x6FF``: STATE | CYCLE | INVALID_ICS(u16 LE) | BAL_STATE | BAL_IC |
-    BAL_CELL | BAL_MARGIN. The balance IC and cell are 0-based, 0xFF = none;
-    the margin is in 0.1 mV."""
+    BAL_CELL | BAL_FLAGS. The balance IC and cell are 0-based, 0xFF = none."""
     data = bytearray(8)
     data[0] = int(chain_state) & 0xFF
     data[1] = int(cycle) & 0xFF
@@ -515,7 +535,7 @@ def encode_chain_status(chain_state: int, cycle: int, invalid_ics: int,
     data[4] = int(balance_state) & 0xFF
     data[5] = int(balance_ic) & 0xFF
     data[6] = int(balance_cell) & 0xFF
-    data[7] = int(balance_margin_0p1mv) & 0xFF
+    data[7] = int(balance_flags) & 0xFF
     return ID_CHAIN_STATUS, bytes(data)
 
 
@@ -527,12 +547,9 @@ def decode_chain_status(data: bytes) -> dict:
     """
     data = _check(data, "0x6FF")
     state, cycle, invalid = struct.unpack("<BBH", data[:4])
-    bal_state, bal_ic, bal_cell = data[4], data[5], data[6]
-    name = BALANCE_STATES.get(bal_state, "unknown")
-    # Only these states name an IC or cell, and 0xFF means none. During a
-    # round it's the lowest group; "too_hot" names just the IC.
-    named = name in BALANCE_ROUND_STATES + ("aborted", "too_hot", "cell_low")
-    has_ic = named and bal_ic != BALANCE_NO_CELL
+    bal_state, bal_ic, bal_cell, bal_flags = data[4], data[5], data[6], data[7]
+    # The firmware sends 0xFF for an IC or cell the state doesn't name.
+    has_ic = bal_ic != BALANCE_NO_CELL
     has_cell = has_ic and bal_cell != BALANCE_NO_CELL
     return {
         "chain_state": "RUNNING" if state == CHAIN_STATE_RUNNING else "INIT",
@@ -540,11 +557,24 @@ def decode_chain_status(data: bytes) -> dict:
         "cycle": cycle,
         "invalid_ics_bitmap": invalid,
         "not_responding_ics": [i + 1 for i in range(16) if (invalid >> i) & 1],
-        "balance_state": name,
+        "balance_state": BALANCE_STATES.get(bal_state, "unknown"),
         "balance_ic": bal_ic + 1 if has_ic else None,
         "balance_cell": bal_cell + 1 if has_cell else None,
-        "balance_margin_mv": (data[7] / 10.0
-                              if name in BALANCE_ROUND_STATES else None),
+        "dcc_unconfirmed": bool(bal_flags & BALANCE_DCC_UNCONFIRMED),
+    }
+
+
+def decode_version(data: bytes) -> dict:
+    """``0x6FE``: the firmware build. ``build_hash`` is None for a build
+    made without git, whose hash is 0."""
+    if len(data) != VERSION_DLC:
+        raise ValueError("0x6FE payload must be %d bytes, got %d" % (VERSION_DLC, len(data)))
+    build_hash, flags = struct.unpack("<IB", bytes(data))
+    no_git = bool(flags & VERSION_NO_GIT)
+    return {
+        "build_hash": None if no_git else "%08x" % build_hash,
+        "build_dirty": bool(flags & VERSION_DIRTY),
+        "build_no_git": no_git,
     }
 
 
@@ -575,6 +605,8 @@ def decode(can_id: int, data: bytes) -> Optional[dict]:
             out = decode_status(data); out["kind"] = "status"
         elif can_id == ID_CHAIN_STATUS:
             out = decode_chain_status(data); out["kind"] = "status"
+        elif can_id == ID_VERSION:
+            out = decode_version(data); out["kind"] = "version"
         elif ID_CELLS_BASE <= can_id <= ID_CELLS_LAST:
             out = decode_cells(can_id, data); out["kind"] = "cells"
         elif ID_IC_BASE <= can_id <= ID_IC_LAST:
@@ -597,6 +629,7 @@ def decode(can_id: int, data: bytes) -> Optional[dict]:
 def owns_id(can_id: int) -> bool:
     """True if this identifier belongs to the BMS protocol on either bus."""
     return (can_id in CAN1_IDS
+            or can_id == ID_VERSION
             or can_id == ID_CHAIN_STATUS
             or ID_CELLS_BASE <= can_id <= ID_CELLS_LAST
             or ID_IC_BASE <= can_id <= ID_IC_LAST

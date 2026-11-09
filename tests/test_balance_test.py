@@ -17,6 +17,7 @@ from bms_monitor.sources import can_frames as F
 from bms_monitor.sources.can_command_gate import (
     MAX_AGE_S,
     QUEUE_LEN,
+    REPEAT_S,
     BalanceTestControl,
     CanCommandRejected,
     check_frame,
@@ -83,21 +84,62 @@ class TestFrames(unittest.TestCase):
         self.assertEqual(out["balance_state"], "cell_low")
         self.assertEqual((out["balance_ic"], out["balance_cell"]), (1, 4))
 
-    def test_a_round_names_the_lowest_group_and_the_margin(self):
-        for state, name in ((2, "discharging"), (8, "resting"), (3, "balanced")):
-            _, data = F.encode_chain_status(1, 0, 0, state, 1, 4, balance_margin_0p1mv=10)
-            out = F.decode_chain_status(data)
-            self.assertEqual(out["balance_state"], name)
-            self.assertEqual((out["balance_ic"], out["balance_cell"]), (2, 5))
-            self.assertEqual(out["balance_margin_mv"], 1.0)
+    def test_states_match_the_firmware(self):
+        # BMS_CAN_BAL_* in the firmware's App/Inc/can_protocol.h.
+        names = {0: "off", 1: "pending", 2: "discharging", 4: "refused", 5: "aborted",
+                 6: "too_hot", 7: "cell_low", 8: "timed_out", 9: "no_data"}
+        for state, name in names.items():
+            _, data = F.encode_chain_status(1, 0, 0, state, 0xFF, 0xFF)
+            self.assertEqual(F.decode_chain_status(data)["balance_state"], name, state)
 
-    def test_margin_only_while_balancing(self):
-        _, data = F.encode_chain_status(1, 0, 0, 0, 0xFF, 0xFF, balance_margin_0p1mv=10)
-        self.assertIsNone(F.decode_chain_status(data)["balance_margin_mv"])
+    def test_timed_out_names_nothing(self):
+        _, data = F.encode_chain_status(1, 0, 0, 8, 0xFF, 0xFF)
+        out = F.decode_chain_status(data)
+        self.assertIsNone(out["balance_ic"])
+        self.assertIsNone(out["balance_cell"])
 
-    def test_unknown_state_is_reported_as_unknown(self):
-        _, data = F.encode_chain_status(1, 0, 0, 9, 0, 0)
-        self.assertEqual(F.decode_chain_status(data)["balance_state"], "unknown")
+    def test_no_data_names_the_ic_only(self):
+        _, data = F.encode_chain_status(1, 0, 0, 9, 1, 0xFF)
+        out = F.decode_chain_status(data)
+        self.assertEqual(out["balance_state"], "no_data")
+        self.assertEqual(out["balance_ic"], 2)
+        self.assertIsNone(out["balance_cell"])
+
+    def test_states_the_firmware_does_not_send_are_unknown(self):
+        for state in (3, 10, 0xFE):
+            _, data = F.encode_chain_status(1, 0, 0, state, 0xFF, 0xFF)
+            self.assertEqual(F.decode_chain_status(data)["balance_state"], "unknown", state)
+
+    def test_an_unconfirmed_dcc_clear_is_flagged_in_any_state(self):
+        for state in (0, 2, 5, 8):
+            _, data = F.encode_chain_status(1, 0, 0, state, 0xFF, 0xFF,
+                                            balance_flags=F.BALANCE_DCC_UNCONFIRMED)
+            self.assertIs(F.decode_chain_status(data)["dcc_unconfirmed"], True, state)
+        _, data = F.encode_chain_status(1, 0, 0, 0, 0xFF, 0xFF)
+        self.assertIs(F.decode_chain_status(data)["dcc_unconfirmed"], False)
+
+    def test_byte_7_is_not_read_as_a_margin(self):
+        _, data = F.encode_chain_status(1, 0, 0, 2, 0xFF, 0xFF,
+                                        balance_flags=F.BALANCE_DCC_UNCONFIRMED)
+        self.assertNotIn("balance_margin_mv", F.decode_chain_status(data))
+
+    def test_version_frame_carries_the_build_hash_and_flags(self):
+        # The firmware's BUILD_HASH 0x1a2b3c4d, built with uncommitted changes.
+        out = F.decode(0x6FE, b"\x4d\x3c\x2b\x1a\x01")
+        self.assertEqual(out["kind"], "version")
+        self.assertEqual(out["build_hash"], "1a2b3c4d")
+        self.assertIs(out["build_dirty"], True)
+        self.assertIs(out["build_no_git"], False)
+        self.assertTrue(F.owns_id(0x6FE))
+
+    def test_a_build_without_git_has_no_hash(self):
+        out = F.decode(0x6FE, b"\x00\x00\x00\x00\x02")
+        self.assertIsNone(out["build_hash"])
+        self.assertIs(out["build_no_git"], True)
+
+    def test_a_version_frame_of_the_wrong_length_is_not_decoded(self):
+        self.assertIsNone(F.decode(0x6FE, b"\x4d\x3c\x2b\x1a"))
+        self.assertIsNone(F.decode(0x6FE, b"\x4d\x3c\x2b\x1a\x00\x00\x00\x00"))
 
     def test_command_frame_is_ours(self):
         self.assertTrue(F.owns_id(0x740))
@@ -158,6 +200,76 @@ class TestGate(unittest.TestCase):
         self.assertEqual(len(control.take()), QUEUE_LEN)
 
 
+class TestHeartbeat(unittest.TestCase):
+    """The firmware stops a discharge after BMS_BALANCE_CMD_TIMEOUT_MS with
+    no ON, so ON is repeated for as long as the toggle is on."""
+
+    ON = (0x740, b"\x01\xA5")
+    OFF = (0x740, b"\x00\xA5")
+
+    def test_on_is_repeated_while_the_toggle_is_on(self):
+        clock = FakeClock()
+        control = BalanceTestControl(clock=clock)
+        control.request(True)
+        self.assertEqual(control.take(), [self.ON])
+        clock.t += REPEAT_S * 0.9
+        self.assertEqual(control.take(), [])
+        for _ in range(5):
+            clock.t += REPEAT_S
+            self.assertEqual(control.take(), [self.ON])
+
+    def test_a_due_repeat_wakes_the_sender(self):
+        clock = FakeClock()
+        control = BalanceTestControl(clock=clock)
+        control.request(True)
+        control.take()
+        self.assertIsNone(control.oldest_age())
+        clock.t += REPEAT_S
+        self.assertIsNotNone(control.oldest_age())
+
+    def test_off_stops_the_repeat(self):
+        clock = FakeClock()
+        control = BalanceTestControl(clock=clock)
+        control.request(True)
+        control.take()
+        control.request(False)
+        self.assertEqual(control.take(), [self.OFF])
+        clock.t += 5 * REPEAT_S
+        self.assertEqual(control.take(), [])
+
+    def test_losing_the_bus_stops_the_repeat(self):
+        clock = FakeClock()
+        control = BalanceTestControl(clock=clock)
+        control.request(True)
+        control.take()
+        control.discard()
+        clock.t += 5 * REPEAT_S
+        self.assertEqual(control.take(), [])
+
+    def test_an_on_that_expired_unsent_is_not_repeated_late(self):
+        # Repeating it would start a discharge long after the click.
+        clock = FakeClock()
+        control = BalanceTestControl(clock=clock)
+        control.request(True)
+        clock.t += MAX_AGE_S + 0.01
+        self.assertEqual(control.take(), [])
+        clock.t += 5 * REPEAT_S
+        self.assertEqual(control.take(), [])
+
+    def test_a_queued_on_is_not_repeated_on_top_of_itself(self):
+        clock = FakeClock()
+        control = BalanceTestControl(clock=clock)
+        control.request(True)
+        clock.t += REPEAT_S * 1.5
+        self.assertEqual(control.take(), [self.ON])
+
+    def test_the_worst_case_gap_stays_inside_the_firmware_timeout(self):
+        from bms_monitor.sources.can_source import TX_MAX_WAIT_S
+        # A repeat is queued REPEAT_S after the last ON and can wait up to
+        # TX_MAX_WAIT_S for a quiet bus.
+        self.assertLess(REPEAT_S + TX_MAX_WAIT_S, F.BALANCE_CMD_TIMEOUT_S)
+
+
 def wait_for(predicate, timeout=10.0, interval=0.05):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -200,7 +312,43 @@ class TestCanSend(unittest.TestCase):
         self.assertEqual(message.arbitration_id, 0x740)
         self.assertFalse(message.is_extended_id)
         self.assertEqual(bytes(message.data), b"\x01\xA5")
-        self.assertTrue(wait_for(lambda: source.status()["tx"]["sent"] == 1))
+        self.assertTrue(wait_for(lambda: source.status()["tx"]["sent"] >= 1))
+
+    def balance_frames(self, controller, seconds):
+        """(time, data) of each 0x740 the controller hears in `seconds`."""
+        out = []
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            message = controller.recv(timeout=0.05)
+            if message is not None and message.arbitration_id == F.ID_BALANCE_CMD:
+                out.append((time.monotonic(), bytes(message.data)))
+        return out
+
+    def test_on_keeps_reaching_the_controller_until_off(self):
+        control = BalanceTestControl()
+        source, controller = self.start(control)
+        control.request(True)
+        heard = self.balance_frames(controller, 1.5)
+        self.assertGreaterEqual(len(heard), 4, heard)
+        self.assertTrue(all(data == b"\x01\xA5" for _, data in heard))
+        gaps = [b[0] - a[0] for a, b in zip(heard, heard[1:])]
+        # The firmware wants ON at least every 500 ms on a quiet bus.
+        self.assertLess(max(gaps), 0.5, gaps)
+        control.request(False)
+        after = self.balance_frames(controller, 1.0)
+        self.assertEqual([data for _, data in after], [b"\x00\xA5"])
+
+    def test_repeats_do_not_flood_the_raw_console(self):
+        control = BalanceTestControl()
+        source, controller = self.start(control)
+        lines = []
+        source.subscribe(lambda kind, payload: lines.append(payload) if kind == "line" else None)
+        control.request(True)
+        self.assertGreaterEqual(len(self.balance_frames(controller, 1.0)), 3)
+        control.request(False)
+        self.balance_frames(controller, 0.3)
+        tx_lines = [line for line in lines if "TX 0x740" in line]
+        self.assertEqual(len(tx_lines), 2, tx_lines)
 
     def run_bursts(self, controller, period, stop_event, sent_at):
         """Send a 6-frame burst every `period` s, like the F105 at 10 Hz,

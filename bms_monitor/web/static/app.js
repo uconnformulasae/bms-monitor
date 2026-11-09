@@ -821,26 +821,46 @@
         ? (latest.partial ? 'IC' + latest.missing.join(', ') + ' silent'
                           : 'cycle rejected')
         : '--');
-      for (const id of ['kpiMin', 'kpiMax', 'kpiSpread']) setText($(id), '--');
-      setText($('kpiMinSub'), '--'); setText($('kpiMaxSub'), '--');
+      for (const id of ['kpiMin', 'kpiMax', 'kpiSpread', 'kpiAvg']) setText($(id), '--');
+      setText($('kpiMinSub'), '--');
+      setText($('kpiMaxSub'), '--');
+      setText($('kpiSpreadSub'), '--');
     } else {
       setText($('kpiPack'), stats.sum.toFixed(2) + ' V');
       setText($('kpiPackSub'), stats.cells.length + 's · avg ' + stats.mean.toFixed(3) + ' V');
-      setText($('kpiMin'), stats.min.v.toFixed(4) + ' V');
-      setText($('kpiMinSub'), 'IC' + stats.min.ic + ' C' + stats.min.cell + ' · '
-        + ((stats.min.v - stats.mean) * 1000).toFixed(1) + ' mV');
-      setText($('kpiMax'), stats.max.v.toFixed(4) + ' V');
-      setText($('kpiMaxSub'), 'IC' + stats.max.ic + ' C' + stats.max.cell + ' · +'
-        + ((stats.max.v - stats.mean) * 1000).toFixed(1) + ' mV');
+      setText($('kpiAvg'), stats.mean.toFixed(3) + ' V');
+      setText($('kpiMin'), stats.min.v.toFixed(3) + ' V');
+      setText($('kpiMinSub'), 'IC' + stats.min.ic + ' C' + stats.min.cell);
+      setText($('kpiMax'), stats.max.v.toFixed(3) + ' V');
+      setText($('kpiMaxSub'), 'IC' + stats.max.ic + ' C' + stats.max.cell);
       setText($('kpiSpread'), stats.spreadMv.toFixed(1) + ' mV');
       $('kpiSpread').className = 'value ' + spreadClass(stats.spreadMv);
       setText($('kpiSpreadSub'), 'limit ' + cfg().warn_spread_mv + ' mV');
+    }
 
-      const recent = visiblePacks().slice(-160).map(C.packStats).filter(Boolean);
-      const t = C.theme();
-      C.drawSparkline($('sparkMin'), recent.map((x) => x.min.v), t.s1);
-      C.drawSparkline($('sparkMax'), recent.map((x) => x.max.v), t.s2);
-      C.drawSparkline($('sparkSpread'), recent.map((x) => x.spreadMv), t.ink2);
+    const thData = currentThermalData();
+    const thValid = thData.valid || [];
+    if (!thValid.length) {
+      setText($('kpiTempMax'), '--');
+      setText($('kpiTempAvg'), '--');
+      setText($('kpiTempMin'), '--');
+      setText($('kpiTempMinSub'), '--');
+      setText($('kpiTempMaxStat'), '--');
+      setText($('kpiTempMaxSub'), '--');
+      setText($('kpiTempDelta'), 'ΔT —');
+    } else {
+      const hot = thValid.reduce((a, b) => (b.celsius > a.celsius ? b : a));
+      const cold = thValid.reduce((a, b) => (b.celsius < a.celsius ? b : a));
+      const mean = thValid.reduce((acc, s) => acc + s.celsius, 0) / thValid.length;
+      const deltaT = hot.celsius - cold.celsius;
+
+      setText($('kpiTempMax'), hot.celsius.toFixed(1) + ' °C');
+      setText($('kpiTempAvg'), mean.toFixed(1) + ' °C');
+      setText($('kpiTempMin'), cold.celsius.toFixed(1) + ' °C');
+      setText($('kpiTempMinSub'), 'IC' + cold.ic + ' A' + (cold.rt || cold.ch || 1));
+      setText($('kpiTempMaxStat'), hot.celsius.toFixed(1) + ' °C');
+      setText($('kpiTempMaxSub'), 'IC' + hot.ic + ' A' + (hot.rt || hot.ch || 1));
+      setText($('kpiTempDelta'), 'ΔT ' + deltaT.toFixed(1) + ' °C');
     }
 
     setText($('kpiPec'), String(st.pec_recent || 0));
@@ -2159,7 +2179,7 @@
       while (meta.firstChild) meta.removeChild(meta.firstChild);
       const items = [
         ['Pack Sum', (frame.pack && typeof frame.pack.sum_v === 'number') ? frame.pack.sum_v.toFixed(3) + ' V' : '--'],
-        ['Spread (ΔV)', (frame.pack && typeof frame.pack.spread_mv === 'number') ? frame.pack.spread_mv.toFixed(1) + ' mV' : '--'],
+        ['Cell Delta (ΔV)', (frame.pack && typeof frame.pack.spread_mv === 'number') ? frame.pack.spread_mv.toFixed(1) + ' mV' : '--'],
         ['Min Cell', frame.pack && frame.pack.min_cell ? 'IC' + frame.pack.min_cell.ic + ' C' + frame.pack.min_cell.cell + ' (' + frame.pack.min_cell.v.toFixed(4) + ' V)' : '--'],
         ['Max Cell', frame.pack && frame.pack.max_cell ? 'IC' + frame.pack.max_cell.ic + ' C' + frame.pack.max_cell.cell + ' (' + frame.pack.max_cell.v.toFixed(4) + ' V)' : '--'],
         ['Peak Temp', frame.temps && frame.temps.hottest ? frame.temps.hottest.celsius.toFixed(1) + ' °C' : '--'],

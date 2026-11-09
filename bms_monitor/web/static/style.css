@@ -489,7 +489,7 @@ main {
 
 .kpis {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.45fr) minmax(0, 1.45fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
   gap: 8px;
 }
 @media (max-width: 1200px) {
@@ -497,9 +497,14 @@ main {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
-@media (max-width: 700px) {
+@media (max-width: 760px) {
   .kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 480px) {
+  .kpis {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -509,6 +514,9 @@ main {
   border-radius: var(--radius);
   padding: 8px 10px 8px;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
 .kpi .label {
   font-size: 10.5px;
@@ -531,7 +539,59 @@ main {
 .kpi.hero .value { font-size: 24px; letter-spacing: -0.015em; }
 .kpi .value.s1 { color: var(--series-1); }
 .kpi .value.s2 { color: var(--series-2); }
-.kpi canvas { width: 100%; height: 18px; display: block; margin-top: 3px; }
+
+.kpi-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.kpi-tag {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kpi-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.ks-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.ks-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.ks-val {
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ks-val.s1 { color: var(--series-1); }
+.ks-val.s2 { color: var(--series-2); }
+.ks-sub {
+  font-size: 9.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ------------------------------------------------------------- cockpit */
 

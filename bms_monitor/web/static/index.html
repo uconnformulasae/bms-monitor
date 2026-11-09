@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BMS Monitor</title>
-<link rel="stylesheet" href="/static/style.css?v=4.1">
+<link rel="stylesheet" href="/static/style.css?v=4.2">
 </head>
 <body>
 
@@ -108,8 +108,8 @@
     <div class="settinggrid">
       <label>Under-voltage (V)<input type="number" id="setUv" step="0.01"></label>
       <label>Over-voltage (V)<input type="number" id="setOv" step="0.01"></label>
-      <label>Spread warning (mV)<input type="number" id="setWarn" step="1"></label>
-      <label>Spread critical (mV)<input type="number" id="setCrit" step="1"></label>
+      <label>Delta warning (mV)<input type="number" id="setWarn" step="1"></label>
+      <label>Delta critical (mV)<input type="number" id="setCrit" step="1"></label>
       <label>NTC beta<input type="number" id="setBeta" step="1"></label>
       <label>NTC R25 (&#8486;)<input type="number" id="setR25" step="100"></label>
       <label>Divider series R (&#8486;)<input type="number" id="setSeries" step="100"></label>
@@ -128,29 +128,61 @@
         <div class="value" id="kpiPack">&mdash;</div>
         <div class="sub" id="kpiPackSub">&mdash;</div>
       </div>
-      <div class="kpi">
-        <div class="label">Spread</div>
+
+      <div class="kpi kpi-consolidated" id="kpiCellVoltages">
+        <div class="kpi-top">
+          <span class="label">Cell Delta</span>
+          <span class="kpi-tag" id="kpiSpreadSub">&mdash;</span>
+        </div>
         <div class="value" id="kpiSpread">&mdash;</div>
-        <div class="sub" id="kpiSpreadSub">&Delta;V</div>
-        <canvas id="sparkSpread" aria-hidden="true"></canvas>
+        <div class="kpi-stats">
+          <div class="ks-col">
+            <span class="ks-label">Avg</span>
+            <span class="ks-val" id="kpiAvg">&mdash;</span>
+          </div>
+          <div class="ks-col">
+            <span class="ks-label">Min</span>
+            <span class="ks-val s1" id="kpiMin">&mdash;</span>
+            <span class="ks-sub" id="kpiMinSub">&mdash;</span>
+          </div>
+          <div class="ks-col">
+            <span class="ks-label">Max</span>
+            <span class="ks-val s2" id="kpiMax">&mdash;</span>
+            <span class="ks-sub" id="kpiMaxSub">&mdash;</span>
+          </div>
+        </div>
       </div>
-      <div class="kpi">
-        <div class="label">Lowest Cell</div>
-        <div class="value s1" id="kpiMin">&mdash;</div>
-        <div class="sub" id="kpiMinSub">&mdash;</div>
-        <canvas id="sparkMin" aria-hidden="true"></canvas>
+
+      <div class="kpi kpi-consolidated" id="kpiCellTemps">
+        <div class="kpi-top">
+          <span class="label">Cell Temps</span>
+          <span class="kpi-tag" id="kpiTempDelta">&mdash;</span>
+        </div>
+        <div class="value" id="kpiTempMax">&mdash;</div>
+        <div class="kpi-stats">
+          <div class="ks-col">
+            <span class="ks-label">Avg</span>
+            <span class="ks-val" id="kpiTempAvg">&mdash;</span>
+          </div>
+          <div class="ks-col">
+            <span class="ks-label">Min</span>
+            <span class="ks-val s1" id="kpiTempMin">&mdash;</span>
+            <span class="ks-sub" id="kpiTempMinSub">&mdash;</span>
+          </div>
+          <div class="ks-col">
+            <span class="ks-label">Max</span>
+            <span class="ks-val s2" id="kpiTempMaxStat">&mdash;</span>
+            <span class="ks-sub" id="kpiTempMaxSub">&mdash;</span>
+          </div>
+        </div>
       </div>
-      <div class="kpi">
-        <div class="label">Highest Cell</div>
-        <div class="value s2" id="kpiMax">&mdash;</div>
-        <div class="sub" id="kpiMaxSub">&mdash;</div>
-        <canvas id="sparkMax" aria-hidden="true"></canvas>
-      </div>
+
       <div class="kpi">
         <div class="label">Daisy Chain</div>
         <div class="value" id="kpiChain">&mdash;</div>
         <div class="sub" id="kpiChainSub">&mdash;</div>
       </div>
+
       <div class="kpi">
         <div class="label">PEC Errors</div>
         <div class="value" id="kpiPec">&mdash;</div>
@@ -316,7 +348,7 @@
   <div class="tabpanel" data-panel="charge" hidden>
     <section class="kpis" aria-label="Charge figures">
       <div class="kpi hero">
-        <div class="label">Cell Spread</div>
+        <div class="label">Cell Delta</div>
         <div class="value" id="chgSpread">&mdash;</div>
         <div class="sub" id="chgSpreadSub">&Delta;V</div>
       </div>
@@ -333,12 +365,12 @@
       <div class="kpi na" id="kpiCurrent">
         <div class="label">Pack Current</div>
         <div class="value na">n/a</div>
-        <div class="sub">no current shunt</div>
+        <div class="sub">&mdash;</div>
       </div>
       <div class="kpi na" id="kpiSoc">
         <div class="label">State of Charge</div>
         <div class="value na">n/a</div>
-        <div class="sub" id="socSub">requires current sensor</div>
+        <div class="sub" id="socSub">&mdash;</div>
       </div>
       <div class="kpi na" id="kpiBalancing">
         <div class="label">Balancing</div>
@@ -349,7 +381,7 @@
 
     <section class="panel">
       <header>
-        <h2>Spread</h2>
+        <h2>Cell Delta</h2>
         <div class="filters">
           <button data-chgwindow="120" aria-pressed="true">2m</button>
           <button data-chgwindow="600" aria-pressed="false">10m</button>
@@ -502,7 +534,7 @@
   BMS Monitor &middot; Read-Only Mode
 </footer>
 
-<script src="/static/charts.js?v=4.1"></script>
-<script src="/static/app.js?v=4.1"></script>
+<script src="/static/charts.js?v=4.2"></script>
+<script src="/static/app.js?v=4.2"></script>
 </body>
 </html>
